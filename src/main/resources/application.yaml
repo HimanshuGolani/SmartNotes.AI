@@ -1,3 +1,23 @@
 spring:
   application:
     name: SmartNotes-AI
+
+  datasource:
+    url: jdbc:postgresql://localhost:5432/smartnotes_ai   # Replace with your DB name
+    username: postgres                                   # Replace with your username
+    password: postgres                              # Replace with your password
+
+  jpa:
+    hibernate:
+      ddl-auto: update       # options: none, validate, update, create, create-drop
+    show-sql: true
+    properties:
+      hibernate:
+        format_sql: true
+        dialect: org.hibernate.dialect.PostgreSQLDialect
+ollama:
+  base-url: http://localhost:11434
+
+vosk:
+  model:
+    path: C:\vosk-model-en-us-0.22
