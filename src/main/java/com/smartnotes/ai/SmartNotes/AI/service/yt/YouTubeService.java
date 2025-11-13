@@ -1,5 +1,6 @@
 package com.smartnotes.ai.SmartNotes.AI.service.yt;
 
+import com.smartnotes.ai.SmartNotes.AI.dto.response.NotesResponse;
 import com.smartnotes.ai.SmartNotes.AI.service.notes_gen.NotesGenerationService;
 import com.smartnotes.ai.SmartNotes.AI.service.transcript.VoskTranscriptionService;
 import lombok.RequiredArgsConstructor;
@@ -23,10 +24,10 @@ public class YouTubeService {
     private static final String FFMPEG_PATH = "C:\\Program Files\\ffmpeg\\bin";
 
     /**
-     * Main entry point - Get transcript and generate notes
+     * Main entry point - Get transcript and generate structured notes
      */
-    public String generateNotesFromVideo(String videoUrl, String language) {
-        log.info("🎬 Starting notes generation for video: {}", videoUrl);
+    public NotesResponse generateStructuredNotesFromVideo(String videoUrl, String language) {
+        log.info("🎬 Starting structured notes generation for video: {}", videoUrl);
 
         if (videoUrl == null || videoUrl.isBlank()) {
             throw new IllegalArgumentException("Invalid YouTube URL");
@@ -60,15 +61,16 @@ public class YouTubeService {
                 log.info("✅ Found existing YouTube transcript!");
             }
 
-            // Step 3️⃣ Generate notes from transcript using NotesGenerationService
+            // Step 3️⃣ Generate structured notes
             log.info("📄 Transcript length: {} characters", transcript.length());
             log.info("📄 Preview: {}...", transcript.substring(0, Math.min(200, transcript.length())));
 
-            log.info("📚 Calling NotesGenerationService to generate notes...");
-            String notes = notesGenerationService.generateNotes(transcript, language);
+            log.info("📚 Calling NotesGenerationService to generate structured notes...");
+            NotesResponse response = notesGenerationService.generateNotes(transcript, language);
+            response.setVideoUrl(videoUrl);
 
-            log.info("✅ Notes generated successfully!");
-            return notes;
+            log.info("✅ Structured notes generated successfully!");
+            return response;
 
         } catch (Exception e) {
             log.error("❌ Notes generation failed for {}: {}", videoUrl, e.getMessage(), e);
@@ -76,9 +78,9 @@ public class YouTubeService {
         }
     }
 
-    /**
-     * Try to get existing YouTube transcript/captions
-     */
+    // ... (rest of the methods remain the same - getExistingTranscript, cleanTranscript,
+    //      downloadAudio, convertToWav, logProcessOutput, cleanupTemp)
+
     private String getExistingTranscript(String videoUrl) {
         try {
             String fileName = "yt_transcript_" + UUID.randomUUID();
@@ -104,7 +106,6 @@ public class YouTubeService {
             logProcessOutput(process);
             int exitCode = process.waitFor();
 
-            // Look for transcript file
             String[] possibleExtensions = {".en.txt", ".txt", ".en.vtt", ".en.srv3"};
             for (String ext : possibleExtensions) {
                 File transcriptFile = outputDir.resolve(fileName + ext).toFile();
@@ -113,10 +114,9 @@ public class YouTubeService {
                     String content = Files.readString(transcriptFile.toPath());
                     cleanupTemp(transcriptFile);
 
-                    // Clean up VTT/SRT formatting
                     content = cleanTranscript(content);
 
-                    if (content.length() > 100) { // Valid transcript
+                    if (content.length() > 100) {
                         return content;
                     }
                 }
@@ -131,32 +131,18 @@ public class YouTubeService {
         }
     }
 
-    /**
-     * Clean transcript from VTT/SRT timestamps and formatting
-     */
     private String cleanTranscript(String transcript) {
-        // Remove VTT headers
         transcript = transcript.replaceAll("WEBVTT.*\\n", "");
         transcript = transcript.replaceAll("Kind:.*\\n", "");
         transcript = transcript.replaceAll("Language:.*\\n", "");
-
-        // Remove timestamps
         transcript = transcript.replaceAll("\\d{2}:\\d{2}:\\d{2}\\.\\d{3} --> \\d{2}:\\d{2}:\\d{2}\\.\\d{3}", "");
         transcript = transcript.replaceAll("<\\d{2}:\\d{2}:\\d{2}\\.\\d{3}>", "");
         transcript = transcript.replaceAll("\\d+\\n\\d{2}:\\d{2}:\\d{2},\\d{3} --> \\d{2}:\\d{2}:\\d{2},\\d{3}", "");
-
-        // Remove HTML tags
         transcript = transcript.replaceAll("<[^>]+>", "");
-
-        // Remove excessive newlines
         transcript = transcript.replaceAll("\\n{3,}", "\n\n");
-
         return transcript.trim();
     }
 
-    /**
-     * Download audio from YouTube
-     */
     private File downloadAudio(String videoUrl) throws IOException, InterruptedException {
         String fileName = "yt_audio_" + UUID.randomUUID() + ".mp3";
         Path outputPath = Paths.get(System.getProperty("user.home"), "Downloads", fileName);
@@ -190,9 +176,6 @@ public class YouTubeService {
         return audioFile;
     }
 
-    /**
-     * Convert MP3 to WAV format (required by Vosk)
-     */
     private File convertToWav(File mp3File) throws IOException, InterruptedException {
         String wavFileName = mp3File.getName().replace(".mp3", ".wav");
         Path wavPath = mp3File.toPath().getParent().resolve(wavFileName);
@@ -202,8 +185,8 @@ public class YouTubeService {
         ProcessBuilder pb = new ProcessBuilder(
                 FFMPEG_PATH + "\\ffmpeg.exe",
                 "-i", mp3File.getAbsolutePath(),
-                "-ar", "16000",  // 16kHz sample rate (required by Vosk)
-                "-ac", "1",       // Mono
+                "-ar", "16000",
+                "-ac", "1",
                 "-f", "wav",
                 wavPath.toString()
         );

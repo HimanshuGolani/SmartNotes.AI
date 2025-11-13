@@ -1,6 +1,5 @@
 package com.smartnotes.ai.SmartNotes.AI.controller;
 
-import com.smartnotes.ai.SmartNotes.AI.dto.request.NotesRequest;
 import com.smartnotes.ai.SmartNotes.AI.dto.response.NotesResponse;
 import com.smartnotes.ai.SmartNotes.AI.service.yt.YouTubeService;
 import lombok.AllArgsConstructor;
@@ -18,38 +17,34 @@ public class NotesController {
     private final YouTubeService youTubeService;
 
     @PostMapping("/generate")
-    public ResponseEntity<NotesResponse> createNotes(
-            @RequestBody NotesRequest request) {
-
-        log.info("📨 Received notes generation request for video: {}", request.getVideoUrl());
+    public ResponseEntity<NotesResponse> createNotes(@RequestBody NotesRequest request) {
+        log.info("📨 Request received: {}", request.getVideoUrl());
 
         try {
-            String notes = youTubeService.generateNotesFromVideo(
+            NotesResponse response = youTubeService.generateStructuredNotesFromVideo(
                     request.getVideoUrl(),
                     request.getLanguage()
             );
 
-            NotesResponse response = NotesResponse.builder()
-                    .notes(notes)
-                    .videoUrl(request.getVideoUrl())
-                    .language(request.getLanguage())
-                    .status("success")
-                    .build();
-
-            return ResponseEntity.status(HttpStatus.CREATED).body(response);
+            return ResponseEntity.ok(response);
 
         } catch (Exception e) {
-            log.error("❌ Error generating notes: {}", e.getMessage(), e);
-
-            NotesResponse errorResponse = NotesResponse.builder()
-                    .status("error")
-                    .error(e.getMessage())
-                    .videoUrl(request.getVideoUrl())
-                    .build();
-
-            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(errorResponse);
+            log.error("❌ Error: {}", e.getMessage(), e);
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
+                    .body(NotesResponse.builder()
+                            .status("error")
+                            .error(e.getMessage())
+                            .videoUrl(request.getVideoUrl())
+                            .build());
         }
     }
 
-
+    @lombok.Data
+    @lombok.Builder
+    @lombok.NoArgsConstructor
+    @lombok.AllArgsConstructor
+    public static class NotesRequest {
+        private String videoUrl;
+        private String language;
+    }
 }
