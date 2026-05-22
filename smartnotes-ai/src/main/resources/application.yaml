@@ -1,0 +1,40 @@
+server:
+  port: 8080
+  servlet:
+    multipart:
+      max-file-size: 500MB
+      max-request-size: 500MB
+
+spring:
+  application:
+    name: smartnotes-ai
+  ai:
+    ollama:
+      base-url: http://localhost:11434
+      chat:
+        options:
+          model: qwen2.5:7b-instruct-q4_K_M
+          temperature: 0.3
+
+smartnotes:
+  workspace: ${user.home}/smartnotes-workspace
+  whisper:
+    url: http://localhost:8000
+  ollama:
+    url: http://localhost:11434
+    text-model: qwen2.5:7b-instruct-q4_K_M
+    vision-model: minicpm-v:8b-2.6-q4_0
+    embed-model: nomic-embed-text
+  excalidraw:
+    mcp-command: npx
+    mcp-args: excalidraw-mcp
+  frames:
+    interval-seconds: 30
+  ytdlp:
+    binary: yt-dlp
+  ffmpeg:
+    binary: ffmpeg
+
+logging:
+  level:
+    com.smartnotes: DEBUG
