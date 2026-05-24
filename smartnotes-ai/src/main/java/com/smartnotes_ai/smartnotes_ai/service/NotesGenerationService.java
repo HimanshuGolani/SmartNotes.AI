@@ -14,6 +14,8 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 @Slf4j
@@ -29,22 +31,25 @@ public class NotesGenerationService {
 
     private static final String TOPIC_PROMPT = """
             You are an expert note-taker. Analyze the following part of a video transcript
-            and extract 1 to 3 main topic sections (depending on length and content density).
-            
+            and extract 1 to 3 main topic sections.
+
             VIDEO TITLE: {title}
             CONTEXT: {context}
-            
+
             TRANSCRIPT WINDOW ({startSec}s - {endSec}s):
             {transcript}
-            
-            Return ONLY a valid JSON array with this exact structure (no markdown, no preamble):
+
+            CRITICAL: Return ONLY a valid JSON array. No markdown fences. No explanation. No preamble.
+            Start your response with [ and end with ].
+
+            Required structure:
             [
               {
                 "title": "Concise topic title (max 60 chars)",
-                "summary": "2-3 sentence summary",
+                "summary": "2-3 sentence summary of what is discussed",
                 "bulletPoints": ["key point 1", "key point 2", "key point 3", "key point 4"],
-                "startTime": <seconds as number>,
-                "endTime": <seconds as number>
+                "startTime": <number>,
+                "endTime": <number>
               }
             ]
             """;
@@ -52,31 +57,34 @@ public class NotesGenerationService {
     private static final String OVERALL_PROMPT = """
             Below are topic-wise notes from a video titled "{title}".
             Write a 3-4 sentence executive summary of the entire video.
-            
+
             TOPICS:
             {topics}
-            
-            Return only the summary text.
+
+            Return only the summary text, no preamble.
             """;
 
     public List<TopicSection> generateTopics(List<TranscriptSegment> segments,
                                              String alignedContext,
                                              String title) {
-        if (segments.isEmpty()) return List.of();
+        if (segments == null || segments.isEmpty()) {
+            log.warn("No transcript segments available - returning empty topics");
+            return List.of();
+        }
 
         double totalDuration = segments.get(segments.size() - 1).getEnd();
-        log.info("Generating topics for {}s of video", totalDuration);
+        log.info("Generating topics for {}s of video, {} segments", totalDuration, segments.size());
 
-        // Adaptive window size: aim for ~5-12 windows max
-        int windowSec = Math.max(120, (int) (totalDuration / 8));
+        // Adaptive window: at least 60s, target ~6-10 windows
+        int windowSec = Math.max(60, (int) (totalDuration / 8));
         log.info("Using window size: {}s", windowSec);
 
         List<List<TranscriptSegment>> windows = splitIntoWindows(segments, windowSec);
         log.info("Split into {} time windows", windows.size());
 
         List<TopicSection> allTopics = new ArrayList<>();
-        String contextSnippet = alignedContext.length() > 1500
-                ? alignedContext.substring(0, 1500) + "..." : alignedContext;
+        String contextSnippet = alignedContext == null ? "" :
+                (alignedContext.length() > 1500 ? alignedContext.substring(0, 1500) : alignedContext);
 
         for (int i = 0; i < windows.size(); i++) {
             List<TranscriptSegment> window = windows.get(i);
@@ -89,12 +97,12 @@ public class NotesGenerationService {
                     .map(s -> String.format(Locale.ROOT, "[%.0fs] %s", s.getStart(), s.getText()))
                     .collect(Collectors.joining("\n"));
 
-            log.info("Generating topics for window {}/{} ({}s-{}s)",
-                    i + 1, windows.size(), (int) startSec, (int) endSec);
+            log.info("Generating topics for window {}/{} ({}s-{}s, {} chars)",
+                    i + 1, windows.size(), (int) startSec, (int) endSec, windowText.length());
 
             try {
                 String prompt = new PromptTemplate(TOPIC_PROMPT).render(Map.of(
-                        "title", title,
+                        "title", title == null ? "" : title,
                         "context", contextSnippet,
                         "startSec", String.valueOf((int) startSec),
                         "endSec", String.valueOf((int) endSec),
@@ -102,25 +110,48 @@ public class NotesGenerationService {
                 ));
 
                 String response = chatModel.call(prompt);
-                List<TopicSection> windowTopics = parseTopics(response, startSec, endSec);
+                log.debug("LLM response (window {}): {}", i + 1,
+                        response.length() > 500 ? response.substring(0, 500) + "..." : response);
+
+                List<TopicSection> windowTopics = parseTopics(response, startSec, endSec, windowText);
+                if (windowTopics.isEmpty()) {
+                    log.warn("Window {} returned 0 topics, creating fallback", i + 1);
+                    windowTopics.add(createFallbackTopic(startSec, endSec, windowText, response));
+                }
+                log.info("Window {} → {} topics extracted", i + 1, windowTopics.size());
                 allTopics.addAll(windowTopics);
             } catch (Exception e) {
-                log.warn("Failed window {}: {}", i + 1, e.getMessage());
+                log.error("Failed window {}: {}", i + 1, e.getMessage(), e);
+                allTopics.add(createFallbackTopic(startSec, endSec, windowText, ""));
             }
         }
 
-        // Deduplicate similar adjacent titles
-        return deduplicate(allTopics);
+        List<TopicSection> deduped = deduplicate(allTopics);
+        log.info("Total topics generated: {} (after dedup)", deduped.size());
+        return deduped;
     }
 
     public String overallSummary(List<TopicSection> topics, String title) {
+        if (topics == null || topics.isEmpty()) {
+            return "Summary unavailable - no topics extracted.";
+        }
         String topicsText = topics.stream()
-                .map(t -> "- " + t.getTitle() + ": " + t.getSummary())
+                .map(t -> "- " + t.getTitle() + ": " + (t.getSummary() == null ? "" : t.getSummary()))
                 .collect(Collectors.joining("\n"));
-        String prompt = new PromptTemplate(OVERALL_PROMPT)
-                .render(Map.of("title", title, "topics", topicsText));
-        return chatModel.call(prompt);
+        try {
+            String prompt = new PromptTemplate(OVERALL_PROMPT)
+                    .render(Map.of("title", title == null ? "" : title, "topics", topicsText));
+            return chatModel.call(prompt);
+        } catch (Exception e) {
+            log.warn("Overall summary failed: {}", e.getMessage());
+            return "This video covers: " + topics.stream()
+                    .map(TopicSection::getTitle)
+                    .limit(5)
+                    .collect(Collectors.joining(", ")) + ".";
+        }
     }
+
+    // ============ HELPERS ============
 
     private List<List<TranscriptSegment>> splitIntoWindows(List<TranscriptSegment> segments, int windowSec) {
         List<List<TranscriptSegment>> windows = new ArrayList<>();
@@ -141,39 +172,151 @@ public class NotesGenerationService {
         return windows;
     }
 
-    private List<TopicSection> parseTopics(String response, double fallbackStart, double fallbackEnd) {
+    /**
+     * Robust JSON parser - tries multiple strategies before giving up.
+     */
+    private List<TopicSection> parseTopics(String response, double fallbackStart, double fallbackEnd, String windowText) {
         List<TopicSection> topics = new ArrayList<>();
-        try {
-            // Strip markdown fences if present
-            String json = response.trim();
-            int firstBracket = json.indexOf('[');
-            int lastBracket = json.lastIndexOf(']');
-            if (firstBracket >= 0 && lastBracket > firstBracket) {
-                json = json.substring(firstBracket, lastBracket + 1);
+        if (response == null || response.isBlank()) return topics;
+
+        // Strategy 1: Extract JSON array using regex
+        String jsonCandidate = extractJsonArray(response);
+        if (jsonCandidate != null) {
+            try {
+                JsonNode arr = mapper.readTree(jsonCandidate);
+                if (arr.isArray()) {
+                    for (JsonNode node : arr) {
+                        TopicSection t = nodeToTopic(node, fallbackStart, fallbackEnd);
+                        if (t != null) topics.add(t);
+                    }
+                }
+                if (!topics.isEmpty()) return topics;
+            } catch (Exception e) {
+                log.debug("Strategy 1 (regex JSON) failed: {}", e.getMessage());
             }
-            JsonNode arr = mapper.readTree(json);
-            for (JsonNode node : arr) {
-                TopicSection t = new TopicSection();
-                t.setTitle(node.path("title").asText("Topic"));
-                t.setSummary(node.path("summary").asText(""));
-                List<String> bullets = new ArrayList<>();
-                for (JsonNode bp : node.path("bulletPoints")) bullets.add(bp.asText());
-                t.setBulletPoints(bullets);
-                t.setStartTime(node.path("startTime").asDouble(fallbackStart));
-                t.setEndTime(node.path("endTime").asDouble(fallbackEnd));
-                topics.add(t);
-            }
-        } catch (Exception e) {
-            log.warn("Failed to parse topic JSON, using fallback: {}", e.getMessage());
-            TopicSection t = new TopicSection();
-            t.setTitle("Section " + (int) fallbackStart + "s");
-            t.setSummary(response.length() > 300 ? response.substring(0, 300) : response);
-            t.setBulletPoints(List.of());
-            t.setStartTime(fallbackStart);
-            t.setEndTime(fallbackEnd);
-            topics.add(t);
         }
+
+        // Strategy 2: Try to find a single object {...} and wrap as array
+        String objCandidate = extractJsonObject(response);
+        if (objCandidate != null) {
+            try {
+                JsonNode obj = mapper.readTree(objCandidate);
+                TopicSection t = nodeToTopic(obj, fallbackStart, fallbackEnd);
+                if (t != null) topics.add(t);
+                if (!topics.isEmpty()) return topics;
+            } catch (Exception e) {
+                log.debug("Strategy 2 (single object) failed: {}", e.getMessage());
+            }
+        }
+
+        // Strategy 3: Clean common issues then retry
+        String cleaned = cleanJson(response);
+        if (cleaned != null && !cleaned.equals(response)) {
+            try {
+                JsonNode arr = mapper.readTree(cleaned);
+                if (arr.isArray()) {
+                    for (JsonNode node : arr) {
+                        TopicSection t = nodeToTopic(node, fallbackStart, fallbackEnd);
+                        if (t != null) topics.add(t);
+                    }
+                }
+                if (!topics.isEmpty()) return topics;
+            } catch (Exception e) {
+                log.debug("Strategy 3 (cleaned JSON) failed: {}", e.getMessage());
+            }
+        }
+
+        log.warn("All JSON parse strategies failed. Raw response (first 300 chars): {}",
+                response.length() > 300 ? response.substring(0, 300) : response);
         return topics;
+    }
+
+    private String extractJsonArray(String text) {
+        // Find first '[' and last ']'
+        int first = text.indexOf('[');
+        int last = text.lastIndexOf(']');
+        if (first >= 0 && last > first) {
+            return text.substring(first, last + 1);
+        }
+        return null;
+    }
+
+    private String extractJsonObject(String text) {
+        Pattern p = Pattern.compile("\\{[^{}]*\"title\"[^{}]*\\}", Pattern.DOTALL);
+        Matcher m = p.matcher(text);
+        if (m.find()) return m.group();
+        return null;
+    }
+
+    private String cleanJson(String text) {
+        if (text == null) return null;
+        String s = text;
+        // Strip markdown fences
+        s = s.replaceAll("(?s)```(?:json)?\\s*", "").replaceAll("```", "");
+        // Remove preamble like "Here is the JSON:"
+        int idx = s.indexOf('[');
+        if (idx > 0) s = s.substring(idx);
+        int last = s.lastIndexOf(']');
+        if (last > 0 && last < s.length() - 1) s = s.substring(0, last + 1);
+        // Remove trailing commas before ] or }
+        s = s.replaceAll(",(\\s*[\\]}])", "$1");
+        // Replace smart quotes
+        s = s.replace('\u2018', '\'').replace('\u2019', '\'')
+                .replace('\u201C', '"').replace('\u201D', '"');
+        return s.trim();
+    }
+
+    private TopicSection nodeToTopic(JsonNode node, double fallbackStart, double fallbackEnd) {
+        if (node == null || !node.isObject()) return null;
+        TopicSection t = new TopicSection();
+        t.setTitle(node.path("title").asText("Topic"));
+        t.setSummary(node.path("summary").asText(""));
+
+        List<String> bullets = new ArrayList<>();
+        JsonNode bp = node.path("bulletPoints");
+        if (bp.isArray()) {
+            for (JsonNode b : bp) bullets.add(b.asText());
+        }
+        t.setBulletPoints(bullets);
+
+        t.setStartTime(node.path("startTime").asDouble(fallbackStart));
+        t.setEndTime(node.path("endTime").asDouble(fallbackEnd));
+
+        // Sanity check - if title is empty/garbage, return null
+        if (t.getTitle() == null || t.getTitle().isBlank()) return null;
+        return t;
+    }
+
+    private TopicSection createFallbackTopic(double startSec, double endSec, String windowText, String llmRaw) {
+        TopicSection t = new TopicSection();
+        t.setTitle(String.format("Section %ds-%ds", (int) startSec, (int) endSec));
+
+        // Try to use LLM response as summary if it looks reasonable
+        String summary;
+        if (llmRaw != null && !llmRaw.isBlank() && llmRaw.length() < 1000) {
+            summary = llmRaw.replaceAll("[\\[\\]{}]", "").trim();
+            if (summary.length() > 250) summary = summary.substring(0, 250) + "...";
+        } else {
+            // Use first 200 chars of transcript as fallback summary
+            String snippet = windowText.replaceAll("\\[\\d+s\\]\\s*", "").trim();
+            summary = snippet.length() > 200 ? snippet.substring(0, 200) + "..." : snippet;
+        }
+        t.setSummary(summary);
+
+        // Extract bullets from sentences
+        List<String> bullets = new ArrayList<>();
+        String[] sentences = windowText.replaceAll("\\[\\d+s\\]\\s*", "").split("[.!?]+");
+        for (String s : sentences) {
+            String trimmed = s.trim();
+            if (trimmed.length() > 20 && trimmed.length() < 150) {
+                bullets.add(trimmed);
+                if (bullets.size() >= 4) break;
+            }
+        }
+        t.setBulletPoints(bullets);
+        t.setStartTime(startSec);
+        t.setEndTime(endSec);
+        return t;
     }
 
     private List<TopicSection> deduplicate(List<TopicSection> topics) {

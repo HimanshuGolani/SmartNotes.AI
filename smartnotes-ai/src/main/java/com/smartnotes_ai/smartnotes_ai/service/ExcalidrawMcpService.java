@@ -11,7 +11,6 @@ import org.springframework.stereotype.Service;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.ArrayList;
 import java.util.List;
 import java.util.Random;
 import java.util.UUID;
@@ -51,6 +50,15 @@ public class ExcalidrawMcpService {
             root.put("source", "smartnotes-ai");
 
             ArrayNode elements = mapper.createArrayNode();
+
+            // Handle empty topics gracefully
+            if (topics == null || topics.isEmpty()) {
+                log.warn("No topics provided - generating overview-only Excalidraw");
+                elements.add(textElement(
+                        "⚠️ No topics could be extracted from this video.\n" +
+                                "Try a longer video or check the transcript quality.",
+                        300, 400, 18, 700, 100, "#e03131", "center", 700));
+            }
 
             // === TITLE BANNER (gradient-like header) ===
             String titleBgId = UUID.randomUUID().toString();
