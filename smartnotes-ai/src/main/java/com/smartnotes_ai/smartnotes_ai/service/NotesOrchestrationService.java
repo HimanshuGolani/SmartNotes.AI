@@ -9,7 +9,6 @@ import org.springframework.stereotype.Service;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.List;
-import java.util.Optional;
 
 @Slf4j
 @Service
@@ -24,6 +23,7 @@ public class NotesOrchestrationService {
     private final NotesGenerationService notesService;
     private final PdfExportService pdfExportService;
     private final ExcalidrawMcpService excalidrawService;
+    private final SmartFrameSelector frameSelector;
 
     @Value("${smartnotes.workspace}")
     private String workspace;
@@ -35,30 +35,40 @@ public class NotesOrchestrationService {
         log.info("Step 1: Downloading video & metadata from YouTube...");
         VideoMetadata meta = downloadService.download(request.getYoutubeUrl());
         log.info("Downloaded: '{}' by {} (duration: {}s)",
-                (Object) meta.getTitle(), (Object) meta.getUploader(), (Object) meta.getDuration());
+                meta.getTitle(), meta.getUploader(), meta.getDuration());
 
-        // 2. Extract frames
+        // 2. Determine frame interval
+        int interval;
+        if (request.getFrameIntervalSeconds() != null) {
+            interval = request.getFrameIntervalSeconds();
+        } else {
+            // Auto: shorts/tiny videos = 3s, normal = 15s, long = 30s
+            if (meta.getDuration() < 60) interval = 3;
+            else if (meta.getDuration() < 600) interval = 15;
+            else interval = 30;
+        }
+        log.info("Using frame interval: {}s for {}s video", interval, meta.getDuration());
+
+        // 3. Extract frames
         log.info("Step 2: Extracting frames...");
-        int interval = request.getFrameIntervalSeconds() != null
-                ? request.getFrameIntervalSeconds() : 30;
         List<Path> frames = frameService.extractFrames(meta.getVideoFile(), meta.getVideoId(), interval);
         meta.setFrameFiles(frames);
-        log.info("Extracted {} frames", Optional.of(frames.size()));
+        log.info("Extracted {} frames", frames.size());
 
-        // 3. Transcribe audio
+        // 4. Transcribe audio
         log.info("Step 3: Transcribing audio...");
         List<TranscriptSegment> segments = transcriptionService.transcribe(meta.getAudioFile());
 
-        // 4. Align transcript with VIDEO'S description (auto-fetched)
+        // 5. Align transcript with VIDEO'S description (auto-fetched)
         log.info("Step 4: Aligning transcript with video description...");
         String videoDescription = meta.getDescription() != null ? meta.getDescription() : "";
         String alignedContext = alignmentService.align(segments, videoDescription);
 
-        // 5. Generate topic sections
+        // 6. Generate topic sections
         log.info("Step 5: Generating topic-wise notes...");
         List<TopicSection> topics = notesService.generateTopics(segments, alignedContext, meta.getTitle());
 
-        // 6. For each topic, pick best frame + caption
+        // 7. For each topic, pick best frame + caption
         log.info("Step 6: Captioning frames per topic...");
         for (TopicSection topic : topics) {
             Path bestFrame = pickFrameForTopic(frames, topic, meta.getDuration(), interval);
@@ -69,10 +79,10 @@ public class NotesOrchestrationService {
             }
         }
 
-        // 7. Overall summary
+        // 8. Overall summary
         String overall = notesService.overallSummary(topics, meta.getTitle());
 
-        // 8. Export
+        // 9. Export
         String pdfPath = null, excaliPath = null;
         if (request.isExportPdf()) {
             log.info("Step 7: Exporting PDF...");
@@ -95,10 +105,7 @@ public class NotesOrchestrationService {
     }
 
     private Path pickFrameForTopic(List<Path> frames, TopicSection topic, double totalDuration, int interval) {
-        if (frames.isEmpty()) return null;
-        double mid = (topic.getStartTime() + topic.getEndTime()) / 2.0;
-        int idx = (int) Math.min(frames.size() - 1, Math.max(0, mid / interval));
-        return frames.get(idx);
+        return frameSelector.pickBestFrame(frames, topic.getStartTime(), topic.getEndTime(), interval);
     }
 
     public Path getPdfPath(String videoId) {

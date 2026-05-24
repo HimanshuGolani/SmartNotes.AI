@@ -34,8 +34,8 @@ public class FrameExtractionService {
 
             ProcessBuilder pb = new ProcessBuilder(
                     ffmpeg, "-y", "-i", videoFile.toString(),
-                    "-vf", "fps=1/" + intervalSeconds + ",scale=1280:-1",
-                    "-q:v", "3",
+                    "-vf", "fps=1/" + intervalSeconds + ",scale=1920:-1",  // Full HD
+                    "-q:v", "2",  // higher quality (2 = best for JPEG)
                     framesDir.resolve("frame_%04d.jpg").toString()
             ).redirectErrorStream(true);
 

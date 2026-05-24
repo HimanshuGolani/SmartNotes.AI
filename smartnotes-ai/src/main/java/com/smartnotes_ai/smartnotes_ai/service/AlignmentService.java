@@ -7,7 +7,9 @@ import org.springframework.ai.ollama.OllamaChatModel;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Service;
 
+import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.stream.Collectors;
 
@@ -21,71 +23,112 @@ public class AlignmentService {
         this.chatModel = chatModel;
     }
 
-    private static final String TEMPLATE_WITH_DESC = """
-            You are an expert technical editor. Below is a YouTube video's official
-            description and the raw transcript segments. Produce a CLEAN, COHERENT
-            context document that:
-            1. Reconciles the transcript with the description
-            2. Fixes obvious transcription errors using the description as ground truth
-            3. Preserves chronological structure
-            4. Identifies the main themes and terminology
+    private static final int CHUNK_CHAR_LIMIT = 8000;
 
-            VIDEO DESCRIPTION:
+    private static final String CHUNK_TEMPLATE = """
+            You are a technical editor. Below is part {chunkIdx} of {chunkTotal} from a video transcript.
+            
+            VIDEO DESCRIPTION (context):
             {description}
-
-            TRANSCRIPT:
+            
+            TRANSCRIPT CHUNK (with timestamps):
             {transcript}
-
-            Return only the cleaned narrative text (no preamble).
+            
+            Produce a CLEAN narrative for this chunk:
+            - Fix transcription errors
+            - Preserve [timestamps] in seconds
+            - Keep technical terms accurate
+            - 1-2 paragraphs only
+            
+            Return only the cleaned text.
             """;
 
-    private static final String TEMPLATE_NO_DESC = """
-            You are an expert technical editor. Below are the raw transcript segments
-            of a video. Produce a CLEAN, COHERENT context document that:
-            1. Fixes obvious transcription errors
-            2. Preserves chronological structure
-            3. Identifies the main themes and terminology
-
-            TRANSCRIPT:
-            {transcript}
-
-            Return only the cleaned narrative text (no preamble).
+    private static final String MERGE_TEMPLATE = """
+            Merge these per-chunk summaries into one cohesive narrative document.
+            Preserve all [timestamps] and chronological order.
+            
+            CHUNK SUMMARIES:
+            {chunks}
+            
+            Return the merged narrative only.
             """;
 
     public String align(List<TranscriptSegment> segments, String description) {
-
-        String transcript = segments.stream()
-                .map(s -> "[" + Math.round(s.getStart()) + "s] " + s.getText())
+        String fullTranscript = segments.stream()
+                .map(s -> String.format(Locale.ROOT, "[%.0fs] %s", s.getStart(), s.getText()))
                 .collect(Collectors.joining("\n"));
 
-        if (transcript.length() > 12000) {
-            transcript = transcript.substring(0, 12000) + "\n...[truncated]";
+        log.info("Transcript: {} chars, {} segments", fullTranscript.length(), segments.size());
+
+        // Short transcript? Single pass.
+        if (fullTranscript.length() <= CHUNK_CHAR_LIMIT) {
+            return alignSingle(fullTranscript, description);
         }
 
-        String prompt;
+        // Long transcript? Chunk + merge.
+        log.info("Long transcript detected, using chunked alignment");
+        List<String> chunks = chunkTranscript(fullTranscript, CHUNK_CHAR_LIMIT);
+        log.info("Split into {} chunks", chunks.size());
 
-        if (description == null || description.isBlank()) {
+        List<String> chunkSummaries = new ArrayList<>();
+        String descSnippet = description == null ? "" :
+                (description.length() > 1500 ? description.substring(0, 1500) : description);
 
-            log.info("No description available, aligning transcript only");
-
-            prompt = new PromptTemplate(TEMPLATE_NO_DESC)
-                    .render(Map.of(
-                            "transcript", transcript
-                    ));
-
-        } else {
-
-            String desc = description.length() > 3000
-                    ? description.substring(0, 3000)
-                    : description;
-
-            prompt = new PromptTemplate(TEMPLATE_WITH_DESC)
-                    .render(Map.of(
-                            "description", desc,
-                            "transcript", transcript
-                    ));
+        for (int i = 0; i < chunks.size(); i++) {
+            log.info("Aligning chunk {}/{}", i + 1, chunks.size());
+            String prompt = new PromptTemplate(CHUNK_TEMPLATE).render(Map.of(
+                    "chunkIdx", String.valueOf(i + 1),
+                    "chunkTotal", String.valueOf(chunks.size()),
+                    "description", descSnippet,
+                    "transcript", chunks.get(i)
+            ));
+            chunkSummaries.add(chatModel.call(prompt));
         }
 
-        return chatModel.call(prompt);
+        // Merge step
+        String merged = chunkSummaries.stream()
+                .map(s -> "---\n" + s)
+                .collect(Collectors.joining("\n\n"));
+
+        if (merged.length() < 12000) {
+            String mergePrompt = new PromptTemplate(MERGE_TEMPLATE)
+                    .render(Map.of("chunks", merged));
+            return chatModel.call(mergePrompt);
+        }
+        return merged;  // already concise enough
+    }
+
+    private String alignSingle(String transcript, String description) {
+        String desc = description == null ? "" :
+                (description.length() > 2000 ? description.substring(0, 2000) : description);
+        String template = """
+                You are a technical editor. Clean this transcript using the description as context.
+                Preserve [timestamps]. Fix errors. Keep chronological order.
+                
+                DESCRIPTION:
+                {description}
+                
+                TRANSCRIPT:
+                {transcript}
+                
+                Return cleaned narrative only.
+                """;
+        return chatModel.call(new PromptTemplate(template)
+                .render(Map.of("description", desc, "transcript", transcript)));
+    }
+
+    private List<String> chunkTranscript(String transcript, int limit) {
+        List<String> chunks = new ArrayList<>();
+        String[] lines = transcript.split("\n");
+        StringBuilder current = new StringBuilder();
+        for (String line : lines) {
+            if (current.length() + line.length() > limit && current.length() > 0) {
+                chunks.add(current.toString());
+                current = new StringBuilder();
+            }
+            current.append(line).append("\n");
+        }
+        if (current.length() > 0) chunks.add(current.toString());
+        return chunks;
     }
 }
