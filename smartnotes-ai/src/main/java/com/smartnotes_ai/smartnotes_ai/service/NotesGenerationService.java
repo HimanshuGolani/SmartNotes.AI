@@ -5,7 +5,6 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.smartnotes_ai.smartnotes_ai.dto.TopicSection;
 import com.smartnotes_ai.smartnotes_ai.dto.TranscriptSegment;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.ai.chat.prompt.PromptTemplate;
 import org.springframework.ai.ollama.OllamaChatModel;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Service;
@@ -13,7 +12,6 @@ import org.springframework.stereotype.Service;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
-import java.util.Map;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
@@ -29,15 +27,16 @@ public class NotesGenerationService {
         this.chatModel = chatModel;
     }
 
+    // Use simple placeholders like %%TITLE%% that won't conflict with JSON braces
     private static final String TOPIC_PROMPT = """
             You are an expert note-taker. Analyze the following part of a video transcript
             and extract 1 to 3 main topic sections.
 
-            VIDEO TITLE: {title}
-            CONTEXT: {context}
+            VIDEO TITLE: %%TITLE%%
+            CONTEXT: %%CONTEXT%%
 
-            TRANSCRIPT WINDOW ({startSec}s - {endSec}s):
-            {transcript}
+            TRANSCRIPT WINDOW (%%START%%s - %%END%%s):
+            %%TRANSCRIPT%%
 
             CRITICAL: Return ONLY a valid JSON array. No markdown fences. No explanation. No preamble.
             Start your response with [ and end with ].
@@ -55,11 +54,11 @@ public class NotesGenerationService {
             """;
 
     private static final String OVERALL_PROMPT = """
-            Below are topic-wise notes from a video titled "{title}".
+            Below are topic-wise notes from a video titled "%%TITLE%%".
             Write a 3-4 sentence executive summary of the entire video.
 
             TOPICS:
-            {topics}
+            %%TOPICS%%
 
             Return only the summary text, no preamble.
             """;
@@ -75,7 +74,6 @@ public class NotesGenerationService {
         double totalDuration = segments.get(segments.size() - 1).getEnd();
         log.info("Generating topics for {}s of video, {} segments", totalDuration, segments.size());
 
-        // Adaptive window: at least 60s, target ~6-10 windows
         int windowSec = Math.max(60, (int) (totalDuration / 8));
         log.info("Using window size: {}s", windowSec);
 
@@ -101,13 +99,12 @@ public class NotesGenerationService {
                     i + 1, windows.size(), (int) startSec, (int) endSec, windowText.length());
 
             try {
-                String prompt = new PromptTemplate(TOPIC_PROMPT).render(Map.of(
-                        "title", title == null ? "" : title,
-                        "context", contextSnippet,
-                        "startSec", String.valueOf((int) startSec),
-                        "endSec", String.valueOf((int) endSec),
-                        "transcript", windowText
-                ));
+                String prompt = TOPIC_PROMPT
+                        .replace("%%TITLE%%", title == null ? "" : title)
+                        .replace("%%CONTEXT%%", contextSnippet)
+                        .replace("%%START%%", String.valueOf((int) startSec))
+                        .replace("%%END%%", String.valueOf((int) endSec))
+                        .replace("%%TRANSCRIPT%%", windowText);
 
                 String response = chatModel.call(prompt);
                 log.debug("LLM response (window {}): {}", i + 1,
@@ -139,8 +136,9 @@ public class NotesGenerationService {
                 .map(t -> "- " + t.getTitle() + ": " + (t.getSummary() == null ? "" : t.getSummary()))
                 .collect(Collectors.joining("\n"));
         try {
-            String prompt = new PromptTemplate(OVERALL_PROMPT)
-                    .render(Map.of("title", title == null ? "" : title, "topics", topicsText));
+            String prompt = OVERALL_PROMPT
+                    .replace("%%TITLE%%", title == null ? "" : title)
+                    .replace("%%TOPICS%%", topicsText);
             return chatModel.call(prompt);
         } catch (Exception e) {
             log.warn("Overall summary failed: {}", e.getMessage());
@@ -151,7 +149,7 @@ public class NotesGenerationService {
         }
     }
 
-    // ============ HELPERS ============
+    // ============ HELPERS (unchanged) ============
 
     private List<List<TranscriptSegment>> splitIntoWindows(List<TranscriptSegment> segments, int windowSec) {
         List<List<TranscriptSegment>> windows = new ArrayList<>();
@@ -172,14 +170,10 @@ public class NotesGenerationService {
         return windows;
     }
 
-    /**
-     * Robust JSON parser - tries multiple strategies before giving up.
-     */
     private List<TopicSection> parseTopics(String response, double fallbackStart, double fallbackEnd, String windowText) {
         List<TopicSection> topics = new ArrayList<>();
         if (response == null || response.isBlank()) return topics;
 
-        // Strategy 1: Extract JSON array using regex
         String jsonCandidate = extractJsonArray(response);
         if (jsonCandidate != null) {
             try {
@@ -196,7 +190,6 @@ public class NotesGenerationService {
             }
         }
 
-        // Strategy 2: Try to find a single object {...} and wrap as array
         String objCandidate = extractJsonObject(response);
         if (objCandidate != null) {
             try {
@@ -209,7 +202,6 @@ public class NotesGenerationService {
             }
         }
 
-        // Strategy 3: Clean common issues then retry
         String cleaned = cleanJson(response);
         if (cleaned != null && !cleaned.equals(response)) {
             try {
@@ -232,7 +224,6 @@ public class NotesGenerationService {
     }
 
     private String extractJsonArray(String text) {
-        // Find first '[' and last ']'
         int first = text.indexOf('[');
         int last = text.lastIndexOf(']');
         if (first >= 0 && last > first) {
@@ -251,16 +242,12 @@ public class NotesGenerationService {
     private String cleanJson(String text) {
         if (text == null) return null;
         String s = text;
-        // Strip markdown fences
         s = s.replaceAll("(?s)```(?:json)?\\s*", "").replaceAll("```", "");
-        // Remove preamble like "Here is the JSON:"
         int idx = s.indexOf('[');
         if (idx > 0) s = s.substring(idx);
         int last = s.lastIndexOf(']');
         if (last > 0 && last < s.length() - 1) s = s.substring(0, last + 1);
-        // Remove trailing commas before ] or }
         s = s.replaceAll(",(\\s*[\\]}])", "$1");
-        // Replace smart quotes
         s = s.replace('\u2018', '\'').replace('\u2019', '\'')
                 .replace('\u201C', '"').replace('\u201D', '"');
         return s.trim();
@@ -282,7 +269,6 @@ public class NotesGenerationService {
         t.setStartTime(node.path("startTime").asDouble(fallbackStart));
         t.setEndTime(node.path("endTime").asDouble(fallbackEnd));
 
-        // Sanity check - if title is empty/garbage, return null
         if (t.getTitle() == null || t.getTitle().isBlank()) return null;
         return t;
     }
@@ -291,19 +277,16 @@ public class NotesGenerationService {
         TopicSection t = new TopicSection();
         t.setTitle(String.format("Section %ds-%ds", (int) startSec, (int) endSec));
 
-        // Try to use LLM response as summary if it looks reasonable
         String summary;
         if (llmRaw != null && !llmRaw.isBlank() && llmRaw.length() < 1000) {
             summary = llmRaw.replaceAll("[\\[\\]{}]", "").trim();
             if (summary.length() > 250) summary = summary.substring(0, 250) + "...";
         } else {
-            // Use first 200 chars of transcript as fallback summary
             String snippet = windowText.replaceAll("\\[\\d+s\\]\\s*", "").trim();
             summary = snippet.length() > 200 ? snippet.substring(0, 200) + "..." : snippet;
         }
         t.setSummary(summary);
 
-        // Extract bullets from sentences
         List<String> bullets = new ArrayList<>();
         String[] sentences = windowText.replaceAll("\\[\\d+s\\]\\s*", "").split("[.!?]+");
         for (String s : sentences) {

@@ -19,7 +19,7 @@ spring:
 smartnotes:
   workspace: ${user.home}/smartnotes-workspace
   whisper:
-    url: http://localhost:8000
+    url: http://localhost:8001
   ollama:
     url: http://localhost:11434
     text-model: qwen2.5:7b-instruct-q4_K_M

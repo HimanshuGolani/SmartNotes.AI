@@ -2,9 +2,11 @@ package com.smartnotes_ai.smartnotes_ai.dto;
 
 import lombok.Builder;
 import lombok.Data;
+
 import java.util.List;
 
-@Data @Builder
+@Data
+@Builder
 public class NotesResponse {
     private String videoId;
     private String title;
@@ -13,4 +15,14 @@ public class NotesResponse {
     private String pdfPath;
     private String excalidrawPath;
     private long processingTimeMs;
+    private boolean cached;          // NEW
+
+    // Convenience getter your frontend already uses
+    public int getTopicCount() {
+        return topics == null ? 0 : topics.size();
+    }
+
+    public double getProcessingTimeSeconds() {
+        return processingTimeMs / 1000.0;
+    }
 }

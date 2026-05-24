@@ -31,14 +31,16 @@ public class NotesController {
     }
 
     @GetMapping("/download/pdf/{videoId}")
-    public ResponseEntity<FileSystemResource> downloadPdf(@PathVariable String videoId) {
-        Path pdf = orchestrator.getPdfPath(videoId);
-        return ResponseEntity.ok()
-                .contentType(MediaType.APPLICATION_PDF)
-                .header(HttpHeaders.CONTENT_DISPOSITION,
-                        "attachment; filename=\"" + videoId + "-notes.pdf\"")
-                .body(new FileSystemResource(pdf));
-    }
+public ResponseEntity<FileSystemResource> downloadPdf(
+        @PathVariable String videoId,
+        @RequestParam(defaultValue = "inline") String disposition) {
+    Path pdf = orchestrator.getPdfPath(videoId);
+    return ResponseEntity.ok()
+            .contentType(MediaType.APPLICATION_PDF)
+            .header(HttpHeaders.CONTENT_DISPOSITION,
+                    disposition + "; filename=\"" + videoId + "-notes.pdf\"")
+            .body(new FileSystemResource(pdf));
+}
 
     @GetMapping("/download/excalidraw/{videoId}")
     public ResponseEntity<FileSystemResource> downloadExcalidraw(@PathVariable String videoId) {

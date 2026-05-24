@@ -1,4 +1,4 @@
-package com.smartnotes_ai.smartnotes_ai;
+	package com.smartnotes_ai.smartnotes_ai;
 
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
