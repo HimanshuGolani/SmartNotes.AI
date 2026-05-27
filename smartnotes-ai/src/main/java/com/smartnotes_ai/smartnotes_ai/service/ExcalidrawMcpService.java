@@ -10,11 +10,39 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.text.SimpleDateFormat;
-import java.util.*;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Date;
+import java.util.HashMap;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Random;
+import java.util.Set;
+import java.util.UUID;
+import java.util.regex.Pattern;
 
+/**
+ * Generates a rich, semantically-themed Excalidraw mind-map document.
+ * <p>
+ * Despite the legacy class name, this is NOT an MCP server client — it directly
+ * builds and serializes Excalidraw v2 JSON. The output is loadable at
+ * <a href="https://excalidraw.com">excalidraw.com</a>.
+ * <p>
+ * Layout strategy:
+ * <ul>
+ *   <li>Left side: legend with color swatches + theme glossary</li>
+ *   <li>Top: title banner + executive summary</li>
+ *   <li>Center: hub node connected to first-row topics</li>
+ *   <li>Below: grid or hierarchical layout of topic cards with sticky bullets</li>
+ * </ul>
+ * Z-order is enforced: arrows → shapes → text (text never occluded by arrows).
+ */
 @Slf4j
 @Service
 public class ExcalidrawMcpService {
@@ -31,325 +59,123 @@ public class ExcalidrawMcpService {
     }
 
     // ============== SEMANTIC THEME PALETTE ==============
-    private static final List<Theme> THEMES = List.of(
-            new Theme("technical", Set.of("code", "function", "class", "api", "method", "library",
-                    "framework", "implementation", "compile", "build", "deploy", "server",
-                    "database", "query", "algorithm", "data structure", "syntax", "variable"),
-                    new String[]{"#a5d8ff", "#1971c2", "#0b3d7a", "#e7f5ff"}),
-            new Theme("conceptual", Set.of("concept", "theory", "idea", "principle", "definition",
-                    "meaning", "abstract", "framework", "model", "paradigm", "philosophy"),
-                    new String[]{"#d0bfff", "#7048e8", "#3b1d80", "#f3f0ff"}),
-            new Theme("process", Set.of("step", "process", "workflow", "procedure", "method",
-                    "approach", "strategy", "phase", "stage", "pipeline", "iteration"),
-                    new String[]{"#b2f2bb", "#2f9e44", "#1b5e20", "#ebfbee"}),
-            new Theme("warning", Set.of("warning", "caution", "issue", "problem", "error",
-                    "bug", "fail", "broken", "danger", "risk", "pitfall", "mistake"),
-                    new String[]{"#ffc9c9", "#e03131", "#7a0e0e", "#fff5f5"}),
-            new Theme("tip", Set.of("tip", "trick", "advice", "recommend", "best practice",
-                    "hint", "useful", "helpful", "remember", "note"),
-                    new String[]{"#ffec99", "#f08c00", "#7a4500", "#fff9db"}),
-            new Theme("example", Set.of("example", "demo", "demonstration", "instance",
-                    "case study", "illustration", "sample", "scenario"),
-                    new String[]{"#ffd8a8", "#e8590c", "#7a2e0a", "#fff4e6"}),
-            new Theme("comparison", Set.of("vs", "versus", "compare", "difference", "similar",
-                    "contrast", "alternative", "choice", "option", "tradeoff"),
-                    new String[]{"#c5f6fa", "#0c8599", "#08484f", "#e3fafc"}),
-            new Theme("general", Set.of(),
-                    new String[]{"#fcc2d7", "#c2255c", "#6b1233", "#fff0f6"})
-    );
-
     private record Theme(String name, Set<String> keywords, String[] colors) {}
 
-    // ============== LAYOUT CONSTANTS (tuned for arrow clearance) ==============
+    /** Pre-compiled keyword patterns for word-boundary matching (fixes Q4). */
+    private static final List<Theme> THEMES;
+    private static final Map<String, Pattern> KEYWORD_PATTERNS = new HashMap<>();
+
+    static {
+        List<Theme> tmp = new ArrayList<>();
+        tmp.add(new Theme("technical", Set.of("code", "function", "class", "api", "method", "library",
+                "framework", "implementation", "compile", "build", "deploy", "server",
+                "database", "query", "algorithm", "syntax", "variable"),
+                new String[]{"#a5d8ff", "#1971c2", "#0b3d7a", "#e7f5ff"}));
+        tmp.add(new Theme("conceptual", Set.of("concept", "theory", "idea", "principle", "definition",
+                "abstract", "model", "paradigm", "philosophy"),
+                new String[]{"#d0bfff", "#7048e8", "#3b1d80", "#f3f0ff"}));
+        tmp.add(new Theme("process", Set.of("step", "process", "workflow", "procedure",
+                "approach", "strategy", "phase", "stage", "pipeline", "iteration"),
+                new String[]{"#b2f2bb", "#2f9e44", "#1b5e20", "#ebfbee"}));
+        tmp.add(new Theme("warning", Set.of("warning", "caution", "issue", "problem", "error",
+                "bug", "fail", "broken", "danger", "risk", "pitfall", "mistake"),
+                new String[]{"#ffc9c9", "#e03131", "#7a0e0e", "#fff5f5"}));
+        tmp.add(new Theme("tip", Set.of("tip", "trick", "advice", "recommend", "hint",
+                "useful", "helpful", "remember"),
+                new String[]{"#ffec99", "#f08c00", "#7a4500", "#fff9db"}));
+        tmp.add(new Theme("example", Set.of("example", "demo", "demonstration", "instance",
+                "illustration", "sample", "scenario"),
+                new String[]{"#ffd8a8", "#e8590c", "#7a2e0a", "#fff4e6"}));
+        tmp.add(new Theme("comparison", Set.of("versus", "compare", "difference", "similar",
+                "contrast", "alternative", "tradeoff"),
+                new String[]{"#c5f6fa", "#0c8599", "#08484f", "#e3fafc"}));
+        tmp.add(new Theme("general", Set.of(),
+                new String[]{"#fcc2d7", "#c2255c", "#6b1233", "#fff0f6"}));
+        THEMES = Collections.unmodifiableList(tmp);
+
+        for (Theme t : THEMES) {
+            for (String kw : t.keywords()) {
+                // Word-boundary match (fixes Q4: "api" no longer matches "capital")
+                KEYWORD_PATTERNS.put(kw,
+                        Pattern.compile("\\b" + Pattern.quote(kw) + "\\b", Pattern.CASE_INSENSITIVE));
+            }
+        }
+    }
+
+    // ============== LAYOUT CONSTANTS ==============
     private static final int CANVAS_PAD = 80;
-    private static final int TOPIC_W = 440;          // wider cards
-    private static final int TOPIC_H = 260;          // taller for content
-    private static final int H_GAP = 220;            // huge horizontal gap for arrow channels
-    private static final int V_GAP = 280;            // huge vertical gap for hub arrow routing
+    private static final int TOPIC_W = 440;
+    private static final int TOPIC_H = 260;
+    private static final int H_GAP = 220;
+    private static final int V_GAP = 280;
     private static final int HUB_W = 280;
     private static final int HUB_H = 110;
     private static final int LEGEND_W = 240;
     private static final int LEGEND_PAD = 24;
-    private static final int FRAME_PAD = 40;         // more frame breathing room
+    private static final int FRAME_PAD = 40;
     private static final int BULLET_W = 200;
     private static final int BULLET_H = 78;
     private static final int BULLET_GAP = 20;
-    private static final int STICKY_OFFSET = 90;     // gap between card and sticky column
+    private static final int STICKY_OFFSET = 90;
+    private static final int BANNER_H = 110;
+    private static final int BANNER_GAP = 30;
+    private static final int OVERVIEW_GAP = 40;
+    private static final int FOOTER_GAP = 100;
+    private static final int BADGE_SIZE = 40;
+    private static final int MAX_BULLETS_PER_TOPIC = 4;
+    private static final int MAX_CROSS_REFS = 3;
     private static final double SIMILARITY_THRESHOLD = 0.72;
 
-    // ============== PUBLIC ENTRY ==============
+    // ============== PUBLIC ENTRY POINTS ==============
+
     public Path export(VideoMetadata meta, String overallSummary, List<TopicSection> topics) {
         return export(meta, overallSummary, topics, null);
     }
 
     public Path export(VideoMetadata meta, String overallSummary, List<TopicSection> topics,
                        Path pdfPath) {
+        if (meta == null || meta.getVideoId() == null) {
+            throw new IllegalArgumentException("VideoMetadata with videoId is required");
+        }
+
         Path outDir = Path.of(workspace, meta.getVideoId());
         Path file = outDir.resolve("notes.excalidraw");
         try {
             Files.createDirectories(outDir);
 
-            // We accumulate elements into THREE buckets to control z-order:
-            //   1. arrowsLayer  — drawn first  → bottom of stack
-            //   2. shapesLayer  — drawn second → middle
-            //   3. textLayer    — drawn last   → top (text never hidden by arrows)
-            ArrayNode arrowsLayer = mapper.createArrayNode();
-            ArrayNode shapesLayer = mapper.createArrayNode();
-            ArrayNode textLayer   = mapper.createArrayNode();
+            List<TopicSection> safeTopics = (topics == null) ? List.of() : topics;
+            ExportContext ctx = new ExportContext(meta, overallSummary, safeTopics, pdfPath);
 
-            if (topics == null) topics = List.of();
-            int n = topics.size();
+            // Phase 1: Semantic analysis
+            analyzeSemantics(ctx);
 
-            // ============ SEMANTIC ANALYSIS ============
-            log.info("Computing semantic themes & embeddings for {} topics...", n);
-            List<Theme> assignedThemes = assignThemes(topics);
-            List<double[]> topicEmbeddings = computeEmbeddings(topics);
-            List<int[]> semanticLinks = findSemanticLinks(topicEmbeddings);
-            log.info("Detected {} semantic cross-references", semanticLinks.size());
+            // Phase 2: Layout
+            ctx.layout = (ctx.topicCount > 8)
+                    ? computeHierarchicalLayout(ctx.topicCount)
+                    : computeGridLayout(ctx.topicCount);
 
-            // ============ LAYOUT ============
-            LayoutStrategy strategy = (n > 8) ? LayoutStrategy.HIERARCHICAL : LayoutStrategy.GRID;
-            log.info("Excalidraw layout: {} for {} topics", strategy, n);
-            Layout layout = (strategy == LayoutStrategy.HIERARCHICAL)
-                    ? computeHierarchicalLayout(n)
-                    : computeGridLayout(n);
-
+            // Phase 3: Build elements (in z-order via 3 layers)
             int contentX = LEGEND_W + LEGEND_PAD * 2 + CANVAS_PAD;
+            buildLegend(ctx, CANVAS_PAD, CANVAS_PAD);
+            int afterBanner = buildBanner(ctx, contentX, CANVAS_PAD);
+            int afterOverview = buildOverview(ctx, contentX, afterBanner);
+            int afterHub = buildHub(ctx, contentX, afterOverview);
+            buildTopics(ctx, contentX, afterHub);
+            buildHubArrows(ctx, contentX, afterHub);
+            buildSemanticArrows(ctx, contentX, afterHub);
+            buildFooter(ctx, contentX, afterHub);
 
-            // ============ LEGEND ============
-            buildLegend(shapesLayer, textLayer, CANVAS_PAD, CANVAS_PAD, n, topics, assignedThemes);
-
-            // ============ TITLE BANNER ============
-            int x = contentX;
-            int y = CANVAS_PAD;
-            int bannerW = layout.contentWidth;
-            int bannerH = 110;
-            String bannerId = newId();
-            shapesLayer.add(rectangle(bannerId, x, y, bannerW, bannerH,
-                    "#d0ebff", "#1864ab", "solid", 3, 8, null));
-
-            String bannerContent = "📺  " + safeTrim(meta.getTitle(), 100) + "\n\n"
-                    + "by " + (meta.getUploader() == null ? "unknown" : meta.getUploader())
-                    + "   •   " + formatDuration(meta.getDuration())
-                    + "   •   " + n + " topics";
-            String bannerTextId = newId();
-            ObjectNode bannerText = boundText(bannerTextId, bannerId, bannerContent,
-                    x, y, bannerW, bannerH, 16, "#0b3d7a", "left", null);
-            textLayer.add(bannerText);
-            registerBoundText(shapesLayer, bannerId, bannerTextId);
-            y += bannerH + 30;
-
-            // ============ EXECUTIVE SUMMARY ============
-            String overview = overallSummary == null ? "" : overallSummary.trim();
-            if (!overview.isEmpty()) {
-                int oh = Math.max(160, Math.min(260,
-                        computeTextHeight(overview, bannerW - 60, 13) + 90));
-                String ovId = newId();
-                shapesLayer.add(rectangle(ovId, x, y, bannerW, oh,
-                        "#fff9db", "#f59f00", "solid", 2, 6, null));
-
-                String ovContent = "📋  EXECUTIVE SUMMARY\n\n" + safeTrim(overview, 700);
-                String ovTextId = newId();
-                textLayer.add(boundText(ovTextId, ovId, ovContent,
-                        x, y, bannerW, oh, 13, "#5c3a09", "left", null));
-                registerBoundText(shapesLayer, ovId, ovTextId);
-                y += oh + 40;
+            if (ctx.topicCount == 0) {
+                buildEmptyStateMessage(ctx, contentX, afterOverview);
             }
 
-            // ============ HUB ============
-            int hubX = x + (bannerW - HUB_W) / 2;
-            int hubY = y;
-            String hubId = newId();
-            shapesLayer.add(ellipse(hubId, hubX, hubY, HUB_W, HUB_H,
-                    "#7048e8", "#e5dbff", "solid", 3, null));
-
-            String hubContent = "🎯  KEY TOPICS\n(" + n + " sections)";
-            String hubTextId = newId();
-            textLayer.add(boundText(hubTextId, hubId, hubContent,
-                    hubX, hubY, HUB_W, HUB_H, 16, "#3b1d80", "center", null));
-            registerBoundText(shapesLayer, hubId, hubTextId);
-
-            int hubBottomX = hubX + HUB_W / 2;
-            int hubBottomY = hubY + HUB_H;
-            int topicsTopY = hubY + HUB_H + V_GAP;
-
-            // ============ TOPIC CARDS + STICKIES + FRAMES + GROUPS ============
-            List<String> topicIds = new ArrayList<>();
-            List<int[]> topicCoords = new ArrayList<>();
-
-            // Determine layout grid info for hub-arrow routing
-            int gridCols = (n <= 3) ? n : (n <= 6 ? 3 : 4);
-
-            for (int i = 0; i < n; i++) {
-                TopicSection t = topics.get(i);
-                String[] colors = assignedThemes.get(i).colors();
-                String fill = colors[0], stroke = colors[1], darkText = colors[2], tint = colors[3];
-
-                int[] pos = layout.positions.get(i);
-                int bx = x + pos[0];
-                int by = topicsTopY + pos[1];
-
-                String groupId = "grp-" + i + "-" + newId();
-                List<String> grp = List.of(groupId);
-
-                // Frame
-                int bulletCount = (t.getBulletPoints() == null) ? 0
-                        : Math.min(4, t.getBulletPoints().size());
-                int bulletColH = bulletCount * (BULLET_H + BULLET_GAP);
-                int frameW = TOPIC_W + BULLET_W + STICKY_OFFSET + 2 * FRAME_PAD;
-                int frameH = Math.max(TOPIC_H, bulletColH) + 2 * FRAME_PAD + 30;
-                int frameX = bx - FRAME_PAD;
-                int frameY = by - FRAME_PAD - 25;
-
-                String frameId = newId();
-                ObjectNode frame = frameElement(frameId, frameX, frameY, frameW, frameH,
-                        "Topic " + (i + 1) + " · " + assignedThemes.get(i).name());
-                frame.set("groupIds", listToJsonArray(grp));
-                shapesLayer.add(frame);
-
-                // Topic card
-                String boxId = newId();
-                topicIds.add(boxId);
-                topicCoords.add(new int[]{bx, by});
-                String pdfLink = (pdfPath != null)
-                        ? buildPdfLink(pdfPath, i + 1, t.getStartTime())
-                        : null;
-                ObjectNode card = rectangle(boxId, bx, by, TOPIC_W, TOPIC_H,
-                        fill, stroke, "solid", 2, 12, frameId);
-                card.set("groupIds", listToJsonArray(grp));
-                if (pdfLink != null) card.put("link", pdfLink);
-                shapesLayer.add(card);
-
-                // ---- COMBINED BOUND TEXT (auto-wraps) ----
-                StringBuilder cardContent = new StringBuilder();
-                String titleStr = safeTrim(t.getTitle() == null ? "Topic " + (i + 1) : t.getTitle(), 80);
-                cardContent.append(titleStr).append("\n");
-                cardContent.append("🏷 ").append(assignedThemes.get(i).name())
-                        .append("   ⏱ ").append(formatTime(t.getStartTime()))
-                        .append(" — ").append(formatTime(t.getEndTime()))
-                        .append("\n\n");
-                String summary = safeTrim(t.getSummary() == null ? "" : t.getSummary(), 360);
-                cardContent.append(summary);
-
-                String cardTextId = newId();
-                ObjectNode cardText = boundText(
-                        cardTextId, boxId, cardContent.toString(),
-                        bx, by, TOPIC_W, TOPIC_H,
-                        13, darkText, "left", frameId
-                );
-                cardText.set("groupIds", listToJsonArray(grp));
-                textLayer.add(cardText);
-                registerBoundText(shapesLayer, boxId, cardTextId);
-
-                // Numbered badge
-                String badgeId = newId();
-                ObjectNode badge = ellipse(badgeId, bx - 18, by - 18, 40, 40,
-                        stroke, stroke, "solid", 2, frameId);
-                badge.set("groupIds", listToJsonArray(grp));
-                shapesLayer.add(badge);
-                ObjectNode badgeText = text(String.valueOf(i + 1),
-                        bx - 18, by - 12, 18, 40, 28, "#ffffff", "center", 700, frameId, null);
-                badgeText.set("groupIds", listToJsonArray(grp));
-                textLayer.add(badgeText);
-
-                // ---- BULLET STICKIES (auto-wrapping) ----
-                int stickyX = bx + TOPIC_W + STICKY_OFFSET;
-                if (t.getBulletPoints() != null) {
-                    int max = Math.min(4, t.getBulletPoints().size());
-                    for (int b = 0; b < max; b++) {
-                        String bp = safeTrim(t.getBulletPoints().get(b), 120);
-                        int sy = by + b * (BULLET_H + BULLET_GAP);
-
-                        String stickyId = newId();
-                        ObjectNode sticky = rectangle(stickyId, stickyX, sy, BULLET_W, BULLET_H,
-                                tint, stroke, "solid", 1, 6, frameId);
-                        sticky.set("groupIds", listToJsonArray(grp));
-                        shapesLayer.add(sticky);
-
-                        String stickyTextId = newId();
-                        ObjectNode stickyText = boundText(stickyTextId, stickyId, "▸ " + bp,
-                                stickyX, sy, BULLET_W, BULLET_H,
-                                11, darkText, "left", frameId);
-                        stickyText.set("groupIds", listToJsonArray(grp));
-                        textLayer.add(stickyText);
-                        registerBoundText(shapesLayer, stickyId, stickyTextId);
-
-                        // Card → sticky arrow (short, horizontal — clean)
-                        String arrId = newId();
-                        ObjectNode arr = elbowArrow(arrId,
-                                bx + TOPIC_W, by + 40 + b * 32,
-                                stickyX, sy + BULLET_H / 2,
-                                stroke, boxId, stickyId, frameId, 70);
-                        arr.set("groupIds", listToJsonArray(grp));
-                        arrowsLayer.add(arr);
-                        registerBinding(shapesLayer, boxId, arrId);
-                        registerBinding(shapesLayer, stickyId, arrId);
-                    }
-                }
-            }
-
-            // ============ HUB → TOPIC ARROWS (only to first row) ============
-            // Drawing arrows from hub to ALL cards causes them to cut through other cards.
-            // Solution: only draw hub arrows to FIRST ROW topics; let frames+numbering
-            // visually communicate the rest of the hierarchy.
-            int firstRowCount = Math.min(gridCols, n);
-            for (int i = 0; i < firstRowCount; i++) {
-                String stroke = assignedThemes.get(i).colors()[1];
-                int[] pos = layout.positions.get(i);
-                int bx = x + pos[0];
-                int by = topicsTopY + pos[1];
-                int targetX = bx + TOPIC_W / 2;
-                int targetY = by;
-
-                String arrId = newId();
-                ObjectNode arr = elbowArrow(arrId,
-                        hubBottomX, hubBottomY, targetX, targetY,
-                        stroke, hubId, topicIds.get(i), null, 60);
-                // Hub arrows are slightly translucent so they don't dominate
-                arr.put("opacity", 70);
-                arrowsLayer.add(arr);
-                registerBinding(shapesLayer, hubId, arrId);
-                registerBinding(shapesLayer, topicIds.get(i), arrId);
-            }
-
-            // ============ SEMANTIC CROSS-REFERENCE ARROWS (side channel routing) ============
-            // Route cross-refs along the LEFT side of the layout to avoid cutting through cards.
-            // Use FROM-card LEFT edge → TO-card LEFT edge through a left margin channel.
-            int leftChannelX = x - 60;   // dedicated channel left of all cards
-            for (int[] link : semanticLinks) {
-                int from = link[0], to = link[1];
-                int[] fromPos = layout.positions.get(from);
-                int[] toPos = layout.positions.get(to);
-                int fromX = x + fromPos[0];                       // left edge of FROM card
-                int fromY = topicsTopY + fromPos[1] + TOPIC_H / 2;
-                int toX = x + toPos[0];                           // left edge of TO card
-                int toY = topicsTopY + toPos[1] + TOPIC_H / 2;
-
-                String arrId = newId();
-                ObjectNode arr = dashedReferenceArrow(arrId, fromX, fromY, toX, toY,
-                        "#adb5bd", topicIds.get(from), topicIds.get(to));
-                arrowsLayer.add(arr);
-                registerBinding(shapesLayer, topicIds.get(from), arrId);
-                registerBinding(shapesLayer, topicIds.get(to), arrId);
-            }
-
-            // ============ FOOTER ============
-            int footerY = topicsTopY + layout.contentHeight + 100;
-            textLayer.add(text(
-                    "Generated by SmartNotes.ai   •   " + semanticLinks.size() + " cross-references   •   "
-                            + new SimpleDateFormat("yyyy-MM-dd").format(new Date())
-                            + "   •   Click any topic title to open PDF",
-                    x, footerY, 11, bannerW, 24,
-                    "#495057", "center", 400, null, null));
-
-            // ============ MERGE LAYERS IN Z-ORDER ============
-            // Final order: arrows → shapes → text  (so text is always on top)
+            // Phase 4: Merge layers (arrows → shapes → text)
             ArrayNode finalElements = mapper.createArrayNode();
-            finalElements.addAll(arrowsLayer);
-            finalElements.addAll(shapesLayer);
-            finalElements.addAll(textLayer);
+            finalElements.addAll(ctx.arrowsLayer);
+            finalElements.addAll(ctx.shapesLayer);
+            finalElements.addAll(ctx.textLayer);
 
-            // ============ ROOT ============
+            // Phase 5: Serialize
             ObjectNode root = mapper.createObjectNode();
             root.put("type", "excalidraw");
             root.put("version", 2);
@@ -363,34 +189,344 @@ public class ExcalidrawMcpService {
             root.set("appState", appState);
             root.set("files", mapper.createObjectNode());
 
-            Files.writeString(file, mapper.writerWithDefaultPrettyPrinter().writeValueAsString(root));
-            log.info("Excalidraw mind-map generated at: {} ({} elements, {} cross-refs, layout={})",
-                    file, finalElements.size(), semanticLinks.size(), strategy);
+            String json = mapper.writerWithDefaultPrettyPrinter().writeValueAsString(root);
+            Files.writeString(file, json, StandardCharsets.UTF_8);
+
+            log.info("Excalidraw mind-map written: path={}, elements={}, topics={}, cross-refs={}, layout={}",
+                    file, finalElements.size(), ctx.topicCount, ctx.semanticLinks.size(),
+                    ctx.layout.strategy);
             return file;
         } catch (Exception e) {
+            log.error("Excalidraw export failed for video {}: {}", meta.getVideoId(), e.getMessage(), e);
             throw new RuntimeException("Excalidraw export failed", e);
         }
     }
 
     // ====================================================================
-    //               SEMANTIC ANALYSIS (themes + cross-refs)
+    //                  CONTEXT (carries all per-export state)
+    // ====================================================================
+
+    private class ExportContext {
+        final VideoMetadata meta;
+        final String overallSummary;
+        final List<TopicSection> topics;
+        final int topicCount;
+        final Path pdfPath;
+
+        String hubId;
+        int hubX;
+        int hubY;
+
+        // Layers
+        final ArrayNode arrowsLayer = mapper.createArrayNode();
+        final ArrayNode shapesLayer = mapper.createArrayNode();
+        final ArrayNode textLayer = mapper.createArrayNode();
+
+        // Index for O(1) binding registration (fixes I6)
+        final Map<String, ObjectNode> shapeIndex = new HashMap<>();
+
+        // Semantic data
+        List<Theme> themes;
+        List<int[]> semanticLinks = List.of();
+
+        // Layout
+        Layout layout;
+        final List<String> topicIds = new ArrayList<>();
+
+        ExportContext(VideoMetadata meta, String summary, List<TopicSection> topics, Path pdfPath) {
+            this.meta = meta;
+            this.overallSummary = summary;
+            this.topics = topics;
+            this.topicCount = topics.size();
+            this.pdfPath = pdfPath;
+        }
+
+        void addShape(ObjectNode shape) {
+            shapesLayer.add(shape);
+            shapeIndex.put(shape.path("id").asText(), shape);
+        }
+
+        void addArrow(ObjectNode arrow) {
+            arrowsLayer.add(arrow);
+        }
+
+        void addText(ObjectNode txt) {
+            textLayer.add(txt);
+        }
+    }
+
+    // ====================================================================
+    //                       PHASE METHODS (Q10 fix)
+    // ====================================================================
+
+    private void analyzeSemantics(ExportContext ctx) {
+        ctx.themes = assignThemes(ctx.topics);
+        if (ctx.topicCount > 1) {
+            try {
+                List<double[]> embeddings = computeEmbeddings(ctx.topics);
+                ctx.semanticLinks = findSemanticLinks(embeddings);
+                log.debug("Detected {} semantic cross-references for {} topics",
+                        ctx.semanticLinks.size(), ctx.topicCount);
+            } catch (Exception e) {
+                log.warn("Semantic analysis skipped: {}", e.getMessage());
+                ctx.semanticLinks = List.of();
+            }
+        }
+    }
+
+    private int buildBanner(ExportContext ctx, int x, int y) {
+        int bannerW = ctx.layout.contentWidth;
+        String bannerId = newId();
+        ctx.addShape(rectangle(bannerId, x, y, bannerW, BANNER_H,
+                "#d0ebff", "#1864ab", "solid", 3, 8, null));
+
+        String title = safeTrim(ctx.meta.getTitle(), 100);
+        if (title.isEmpty()) title = "(untitled)";
+        String uploader = ctx.meta.getUploader() == null ? "unknown" : ctx.meta.getUploader();
+        String content = "📺  " + title + "\n\n"
+                + "by " + uploader
+                + "   •   " + formatDuration(ctx.meta.getDuration())
+                + "   •   " + ctx.topicCount + " topic" + (ctx.topicCount == 1 ? "" : "s");
+
+        String textId = newId();
+        ctx.addText(boundText(textId, bannerId, content,
+                x, y, bannerW, BANNER_H, 16, "#0b3d7a", "left"));
+        registerBoundText(ctx, bannerId, textId);
+        return y + BANNER_H + BANNER_GAP;
+    }
+
+    private int buildOverview(ExportContext ctx, int x, int y) {
+        String overview = ctx.overallSummary == null ? "" : ctx.overallSummary.trim();
+        if (overview.isEmpty()) return y;
+
+        int bannerW = ctx.layout.contentWidth;
+        int oh = Math.max(160, Math.min(260,
+                computeTextHeight(overview, bannerW - 60, 13) + 90));
+        String ovId = newId();
+        ctx.addShape(rectangle(ovId, x, y, bannerW, oh,
+                "#fff9db", "#f59f00", "solid", 2, 6, null));
+
+        String content = "📋  EXECUTIVE SUMMARY\n\n" + safeTrim(overview, 700);
+        String textId = newId();
+        ctx.addText(boundText(textId, ovId, content, x, y, bannerW, oh, 13, "#5c3a09", "left"));
+        registerBoundText(ctx, ovId, textId);
+        return y + oh + OVERVIEW_GAP;
+    }
+
+    private int buildHub(ExportContext ctx, int x, int y) {
+        if (ctx.topicCount == 0) return y;
+
+        int bannerW = ctx.layout.contentWidth;
+        int hubX = x + (bannerW - HUB_W) / 2;
+        String hubId = newId();
+        ctx.hubId = hubId;
+        ctx.hubX = hubX;
+        ctx.hubY = y;
+        ctx.addShape(ellipse(hubId, hubX, y, HUB_W, HUB_H,
+                "#7048e8", "#e5dbff", "solid", 3, null));
+
+        String content = "🎯  KEY TOPICS\n(" + ctx.topicCount + " section"
+                + (ctx.topicCount == 1 ? "" : "s") + ")";
+        String textId = newId();
+        ctx.addText(boundText(textId, hubId, content, hubX, y, HUB_W, HUB_H,
+                16, "#3b1d80", "center"));
+        registerBoundText(ctx, hubId, textId);
+
+        return y + HUB_H + V_GAP;
+    }
+
+    private void buildTopics(ExportContext ctx, int x, int topicsTopY) {
+        for (int i = 0; i < ctx.topicCount; i++) {
+            buildSingleTopic(ctx, i, x, topicsTopY);
+        }
+    }
+
+    private void buildSingleTopic(ExportContext ctx, int i, int x, int topicsTopY) {
+        TopicSection t = ctx.topics.get(i);
+        Theme theme = ctx.themes.get(i);
+        String[] colors = theme.colors();
+        String fill = colors[0], stroke = colors[1], darkText = colors[2], tint = colors[3];
+
+        int[] pos = ctx.layout.positions.get(i);
+        int bx = x + pos[0];
+        int by = topicsTopY + pos[1];
+
+        String groupId = "grp-" + i + "-" + newId();
+        ArrayNode grpArr = listToJsonArray(List.of(groupId));
+
+        // Frame sizing
+        int bulletCount = countBullets(t);
+        int bulletColH = bulletCount * (BULLET_H + BULLET_GAP);
+        int frameW = TOPIC_W + BULLET_W + STICKY_OFFSET + 2 * FRAME_PAD;
+        int frameH = Math.max(TOPIC_H, bulletColH) + 2 * FRAME_PAD + 30;
+        int frameX = bx - FRAME_PAD;
+        int frameY = by - FRAME_PAD - 25;
+
+        String frameId = newId();
+        ObjectNode frame = frameElement(frameId, frameX, frameY, frameW, frameH,
+                "Topic " + (i + 1) + " · " + theme.name());
+        frame.set("groupIds", grpArr.deepCopy());
+        ctx.addShape(frame);
+
+        // Topic card
+        String boxId = newId();
+        ctx.topicIds.add(boxId);
+        String pdfLink = (ctx.pdfPath != null) ? buildPdfLink(ctx.pdfPath, i + 1) : null;
+        ObjectNode card = rectangle(boxId, bx, by, TOPIC_W, TOPIC_H,
+                fill, stroke, "solid", 2, 12, frameId);
+        card.set("groupIds", grpArr.deepCopy());
+        if (pdfLink != null) card.put("link", pdfLink);
+        ctx.addShape(card);
+
+        // Card text content
+        String titleStr = safeTrim(t.getTitle() == null ? "Topic " + (i + 1) : t.getTitle(), 80);
+        String summary = safeTrim(t.getSummary() == null ? "" : t.getSummary(), 360);
+        String content = titleStr + "\n"
+                + "🏷 " + theme.name()
+                + "   ⏱ " + formatTime(t.getStartTime())
+                + " — " + formatTime(t.getEndTime())
+                + "\n\n" + summary;
+
+        String cardTextId = newId();
+        ObjectNode cardText = boundText(cardTextId, boxId, content,
+                bx, by, TOPIC_W, TOPIC_H, 13, darkText, "left");
+        cardText.set("groupIds", grpArr.deepCopy());
+        ctx.addText(cardText);
+        registerBoundText(ctx, boxId, cardTextId);
+
+        // Numbered badge (I1 fix: vertically center the number)
+        String badgeId = newId();
+        ObjectNode badge = ellipse(badgeId, bx - BADGE_SIZE / 2, by - BADGE_SIZE / 2,
+                BADGE_SIZE, BADGE_SIZE, stroke, stroke, "solid", 2, frameId);
+        badge.set("groupIds", grpArr.deepCopy());
+        ctx.addShape(badge);
+
+        String badgeTextId = newId();
+        ObjectNode badgeText = boundText(badgeTextId, badgeId, String.valueOf(i + 1),
+                bx - BADGE_SIZE / 2, by - BADGE_SIZE / 2, BADGE_SIZE, BADGE_SIZE,
+                16, "#ffffff", "center");
+        badgeText.set("groupIds", grpArr.deepCopy());
+        ctx.addText(badgeText);
+        registerBoundText(ctx, badgeId, badgeTextId);
+
+        // Bullet stickies
+        int stickyX = bx + TOPIC_W + STICKY_OFFSET;
+        if (t.getBulletPoints() != null) {
+            int max = Math.min(MAX_BULLETS_PER_TOPIC, t.getBulletPoints().size());
+            for (int b = 0; b < max; b++) {
+                String bp = safeTrim(t.getBulletPoints().get(b), 120);
+                int sy = by + b * (BULLET_H + BULLET_GAP);
+
+                String stickyId = newId();
+                ObjectNode sticky = rectangle(stickyId, stickyX, sy, BULLET_W, BULLET_H,
+                        tint, stroke, "solid", 1, 6, frameId);
+                sticky.set("groupIds", grpArr.deepCopy());
+                ctx.addShape(sticky);
+
+                String stickyTextId = newId();
+                ObjectNode stickyText = boundText(stickyTextId, stickyId, "▸ " + bp,
+                        stickyX, sy, BULLET_W, BULLET_H, 11, darkText, "left");
+                stickyText.set("groupIds", grpArr.deepCopy());
+                ctx.addText(stickyText);
+                registerBoundText(ctx, stickyId, stickyTextId);
+
+                // Card → sticky arrow (gap=8 for visual connection — fixes B3)
+                String arrId = newId();
+                ObjectNode arr = elbowArrow(arrId,
+                        bx + TOPIC_W, by + 40 + b * 32,
+                        stickyX, sy + BULLET_H / 2,
+                        stroke, boxId, stickyId, frameId, 8);
+                arr.set("groupIds", grpArr.deepCopy());
+                ctx.addArrow(arr);
+                registerBinding(ctx, boxId, arrId);
+                registerBinding(ctx, stickyId, arrId);
+            }
+        }
+    }
+
+    private void buildHubArrows(ExportContext ctx, int x, int topicsTopY) {
+        if (ctx.topicCount == 0 || ctx.hubId == null) return;
+
+        int gridCols = computeGridCols(ctx.topicCount);
+        int firstRowCount = Math.min(gridCols, ctx.topicCount);
+        int hubBottomX = ctx.hubX + HUB_W / 2;
+        int hubBottomY = ctx.hubY + HUB_H;
+
+        for (int i = 0; i < firstRowCount; i++) {
+            String stroke = ctx.themes.get(i).colors()[1];
+            int[] pos = ctx.layout.positions.get(i);
+            int bx = x + pos[0];
+            int by = topicsTopY + pos[1];
+            int targetX = bx + TOPIC_W / 2;
+
+            String arrId = newId();
+            // gap=10 instead of 60 so arrow visually connects (B3 fix)
+            ObjectNode arr = elbowArrow(arrId, hubBottomX, hubBottomY, targetX, by,
+                    stroke, ctx.hubId, ctx.topicIds.get(i), null, 10);
+            arr.put("opacity", 70);
+            ctx.addArrow(arr);
+            registerBinding(ctx, ctx.hubId, arrId);
+            registerBinding(ctx, ctx.topicIds.get(i), arrId);
+        }
+    }
+
+    private void buildSemanticArrows(ExportContext ctx, int x, int topicsTopY) {
+        for (int[] link : ctx.semanticLinks) {
+            int from = link[0], to = link[1];
+            int[] fromPos = ctx.layout.positions.get(from);
+            int[] toPos = ctx.layout.positions.get(to);
+            int fromX = x + fromPos[0];
+            int fromY = topicsTopY + fromPos[1] + TOPIC_H / 2;
+            int toX = x + toPos[0];
+            int toY = topicsTopY + toPos[1] + TOPIC_H / 2;
+
+            String arrId = newId();
+            ObjectNode arr = dashedReferenceArrow(arrId, fromX, fromY, toX, toY,
+                    "#adb5bd", ctx.topicIds.get(from), ctx.topicIds.get(to));
+            ctx.addArrow(arr);
+            registerBinding(ctx, ctx.topicIds.get(from), arrId);
+            registerBinding(ctx, ctx.topicIds.get(to), arrId);
+        }
+    }
+
+    private void buildFooter(ExportContext ctx, int x, int topicsTopY) {
+        int footerY = topicsTopY + ctx.layout.contentHeight + FOOTER_GAP;
+        String linkHint = (ctx.pdfPath != null) ? "   •   Click any topic card to open PDF" : "";
+        String content = "Generated by SmartNotes.ai   •   " + ctx.semanticLinks.size()
+                + " cross-reference" + (ctx.semanticLinks.size() == 1 ? "" : "s")
+                + "   •   " + new SimpleDateFormat("yyyy-MM-dd").format(new Date())
+                + linkHint;
+        ctx.addText(text(content, x, footerY, 11, ctx.layout.contentWidth, 24,
+                "#495057", "center", null, null));
+    }
+
+    private void buildEmptyStateMessage(ExportContext ctx, int x, int y) {
+        String msg = "⚠️  No topics could be extracted from this video.\n"
+                + "Try a longer or higher-quality video, or check the transcript.";
+        ctx.addText(text(msg, x, y + 100, 18, ctx.layout.contentWidth, 80,
+                "#e03131", "center", null, null));
+    }
+
+    // ====================================================================
+    //                       SEMANTIC ANALYSIS
     // ====================================================================
 
     private List<Theme> assignThemes(List<TopicSection> topics) {
-        List<Theme> result = new ArrayList<>();
+        List<Theme> result = new ArrayList<>(topics.size());
         for (TopicSection t : topics) {
             String haystack = ((t.getTitle() == null ? "" : t.getTitle()) + " "
                     + (t.getSummary() == null ? "" : t.getSummary()) + " "
                     + (t.getBulletPoints() == null ? "" : String.join(" ", t.getBulletPoints())))
                     .toLowerCase(Locale.ROOT);
 
-            Theme best = THEMES.get(THEMES.size() - 1);
+            Theme best = THEMES.get(THEMES.size() - 1); // general fallback
             int bestScore = 0;
             for (Theme th : THEMES) {
                 if (th.keywords().isEmpty()) continue;
                 int score = 0;
                 for (String kw : th.keywords()) {
-                    if (haystack.contains(kw)) score++;
+                    Pattern p = KEYWORD_PATTERNS.get(kw);
+                    if (p != null && p.matcher(haystack).find()) score++;
                 }
                 if (score > bestScore) {
                     bestScore = score;
@@ -403,61 +539,77 @@ public class ExcalidrawMcpService {
     }
 
     private List<double[]> computeEmbeddings(List<TopicSection> topics) {
-        List<String> texts = new ArrayList<>();
+        List<String> texts = new ArrayList<>(topics.size());
         for (TopicSection t : topics) {
             String txt = (t.getTitle() == null ? "" : t.getTitle()) + ". "
                     + (t.getSummary() == null ? "" : t.getSummary());
-            texts.add(txt);
+            texts.add(txt.isBlank() ? " " : txt);
         }
-        try {
-            return embeddingService.embedAll(texts);
-        } catch (Exception e) {
-            log.warn("Embeddings unavailable: {}", e.getMessage());
-            List<double[]> empty = new ArrayList<>();
-            for (int i = 0; i < topics.size(); i++) empty.add(new double[0]);
-            return empty;
+        List<double[]> result = embeddingService.embedAll(texts);
+        if (result == null || result.size() != topics.size()) {
+            log.warn("Embedding service returned mismatched sizes; skipping semantic links");
+            return Collections.emptyList();
         }
+        return result;
     }
 
     private List<int[]> findSemanticLinks(List<double[]> embeddings) {
         List<int[]> links = new ArrayList<>();
+        if (embeddings.isEmpty()) return links;
+
+        // Track scores so we can pick the TOP-K most similar (fixes B4)
+        record Pair(int i, int j, double sim) {}
+        List<Pair> all = new ArrayList<>();
         int n = embeddings.size();
         for (int i = 0; i < n; i++) {
             for (int j = i + 1; j < n; j++) {
-                if (j == i + 1) continue;
-                double sim = EmbeddingService.cosineSimilarity(embeddings.get(i), embeddings.get(j));
+                double[] a = embeddings.get(i);
+                double[] b = embeddings.get(j);
+                if (a.length == 0 || b.length == 0) continue;
+                double sim = EmbeddingService.cosineSimilarity(a, b);
                 if (sim >= SIMILARITY_THRESHOLD) {
-                    links.add(new int[]{i, j});
+                    all.add(new Pair(i, j, sim));
                 }
             }
         }
-        // Cap at 3 cross-refs to avoid visual clutter
-        if (links.size() > 3) {
-            links = links.subList(0, 3);
+        // Sort by similarity desc, take top MAX_CROSS_REFS (avoid clutter)
+        all.sort((p1, p2) -> Double.compare(p2.sim, p1.sim));
+        for (int k = 0; k < Math.min(MAX_CROSS_REFS, all.size()); k++) {
+            Pair p = all.get(k);
+            links.add(new int[]{p.i, p.j});
         }
         return links;
     }
 
     // ====================================================================
-    //                          LAYOUT ENGINES
+    //                          LAYOUT
     // ====================================================================
 
-    private enum LayoutStrategy { GRID, HIERARCHICAL }
+    private enum LayoutStrategy {GRID, HIERARCHICAL}
 
     private static class Layout {
-        List<int[]> positions = new ArrayList<>();
+        final List<int[]> positions = new ArrayList<>();
         int contentWidth;
         int contentHeight;
+        LayoutStrategy strategy;
+    }
+
+    private static int computeGridCols(int n) {
+        if (n <= 0) return 1;
+        if (n <= 3) return n;
+        if (n <= 6) return 3;
+        return 4;
     }
 
     private Layout computeGridLayout(int n) {
         Layout l = new Layout();
+        l.strategy = LayoutStrategy.GRID;
         if (n == 0) {
             l.contentWidth = 1200;
             l.contentHeight = 200;
             return l;
         }
-        int cols = n <= 3 ? n : (n <= 6 ? 3 : 4);
+        int cols = computeGridCols(n);
         int rows = (int) Math.ceil((double) n / cols);
         int cellW = TOPIC_W + BULLET_W + STICKY_OFFSET + 2 * FRAME_PAD;
         int cellH = TOPIC_H + 2 * FRAME_PAD + 60;
@@ -476,6 +628,13 @@ public class ExcalidrawMcpService {
 
     private Layout computeHierarchicalLayout(int n) {
         Layout l = new Layout();
+        l.strategy = LayoutStrategy.HIERARCHICAL;
+        if (n == 0) {
+            l.contentWidth = 1200;
+            l.contentHeight = 200;
+            return l;
+        }
+
         int layers = Math.min(6, Math.max(2, (int) Math.ceil(Math.sqrt(n / 2.0))));
         int perLayer = (int) Math.ceil((double) n / layers);
 
@@ -503,109 +662,110 @@ public class ExcalidrawMcpService {
     }
 
     // ====================================================================
-    //                          LEGEND BUILDER
+    //                          LEGEND
     // ====================================================================
 
-    private void buildLegend(ArrayNode shapesLayer, ArrayNode textLayer,
-                             int x, int y, int n,
-                             List<TopicSection> topics, List<Theme> themes) {
+    private void buildLegend(ExportContext ctx, int x, int y) {
+        if (ctx.topicCount == 0) return;
+
         int rowH = 38;
         int headerH = 80;
-
         Set<String> usedThemes = new LinkedHashSet<>();
-        for (Theme t : themes) usedThemes.add(t.name());
+        for (Theme t : ctx.themes) usedThemes.add(t.name());
         int themeHeaderH = 40 + usedThemes.size() * 22 + 14;
-
-        int legendH = headerH + Math.max(1, n) * rowH + themeHeaderH + 40;
+        int legendH = headerH + ctx.topicCount * rowH + themeHeaderH + 40;
 
         String legendBgId = newId();
-        shapesLayer.add(rectangle(legendBgId, x, y, LEGEND_W, legendH,
+        ctx.addShape(rectangle(legendBgId, x, y, LEGEND_W, legendH,
                 "#ffffff", "#adb5bd", "solid", 1, 6, null));
 
-        textLayer.add(text("🎨 LEGEND", x + 16, y + 16, 16, LEGEND_W - 32, 24,
-                "#212529", "left", 700, null, null));
-        textLayer.add(text("Topics & semantic themes", x + 16, y + 40, 11, LEGEND_W - 32, 16,
-                "#868e96", "left", 400, null, null));
+        ctx.addText(text("🎨 LEGEND", x + 16, y + 16, 16, LEGEND_W - 32, 24,
+                "#212529", "left", null, null));
+        ctx.addText(text("Topics & semantic themes", x + 16, y + 40, 11, LEGEND_W - 32, 16,
+                "#868e96", "left", null, null));
 
-        shapesLayer.add(line(x + 12, y + 64, x + LEGEND_W - 12, y + 64, "#dee2e6", null));
+        ctx.addShape(line(x + 12, y + 64, x + LEGEND_W - 12, y + 64, "#dee2e6", null));
 
         int curY = y + headerH;
-        for (int i = 0; i < n && i < topics.size(); i++) {
-            String[] colors = themes.get(i).colors();
+        for (int i = 0; i < ctx.topicCount; i++) {
+            String[] colors = ctx.themes.get(i).colors();
             String fill = colors[0], stroke = colors[1], darkText = colors[2];
 
             String swatchId = newId();
-            shapesLayer.add(rectangle(swatchId, x + 16, curY + 8, 22, 22,
+            ctx.addShape(rectangle(swatchId, x + 16, curY + 8, 22, 22,
                     fill, stroke, "solid", 2, 4, null));
-            textLayer.add(text(String.valueOf(i + 1), x + 16, curY + 11, 11, 22, 18,
-                    darkText, "center", 700, null, null));
 
-            String label = safeTrim(topics.get(i).getTitle() == null
-                    ? "Topic " + (i + 1) : topics.get(i).getTitle(), 22);
-            textLayer.add(text(label, x + 48, curY + 10, 11, LEGEND_W - 60, 20,
-                    "#343a40", "left", 500, null, null));
+            String swatchTextId = newId();
+            ObjectNode swText = boundText(swatchTextId, swatchId, String.valueOf(i + 1),
+                    x + 16, curY + 8, 22, 22, 11, darkText, "center");
+            ctx.addText(swText);
+            registerBoundText(ctx, swatchId, swatchTextId);
+
+            String label = safeTrim(ctx.topics.get(i).getTitle() == null
+                    ? "Topic " + (i + 1) : ctx.topics.get(i).getTitle(), 22);
+            ctx.addText(text(label, x + 48, curY + 10, 11, LEGEND_W - 60, 20,
+                    "#343a40", "left", null, null));
 
             curY += rowH;
         }
 
         curY += 12;
-        shapesLayer.add(line(x + 12, curY, x + LEGEND_W - 12, curY, "#dee2e6", null));
+        ctx.addShape(line(x + 12, curY, x + LEGEND_W - 12, curY, "#dee2e6", null));
         curY += 10;
-        textLayer.add(text("THEMES IN USE", x + 16, curY, 10, LEGEND_W - 32, 16,
-                "#495057", "left", 700, null, null));
+        ctx.addText(text("THEMES IN USE", x + 16, curY, 10, LEGEND_W - 32, 16,
+                "#495057", "left", null, null));
         curY += 22;
         for (String themeName : usedThemes) {
-            Theme th = THEMES.stream().filter(t -> t.name().equals(themeName)).findFirst()
-                    .orElse(THEMES.get(THEMES.size() - 1));
-            String dotId = newId();
-            shapesLayer.add(ellipse(dotId, x + 18, curY + 4, 10, 10,
+            Theme th = THEMES.stream().filter(t -> t.name().equals(themeName))
+                    .findFirst().orElse(THEMES.get(THEMES.size() - 1));
+            ctx.addShape(ellipse(newId(), x + 18, curY + 4, 10, 10,
                     th.colors()[1], th.colors()[1], "solid", 1, null));
-            textLayer.add(text(th.name(), x + 36, curY, 10, LEGEND_W - 52, 16,
-                    "#495057", "left", 400, null, null));
+            ctx.addText(text(th.name(), x + 36, curY, 10, LEGEND_W - 52, 16,
+                    "#495057", "left", null, null));
             curY += 22;
         }
     }
 
     // ====================================================================
-    //                       BINDING REGISTRATION
+    //                       BINDING REGISTRATION (O(1) — fixes I6)
     // ====================================================================
 
-    private void registerBinding(ArrayNode elements, String shapeId, String arrowId) {
-        for (JsonNode el : elements) {
-            if (shapeId.equals(el.path("id").asText())) {
-                ObjectNode shape = (ObjectNode) el;
-                ArrayNode bound = shape.get("boundElements") != null && shape.get("boundElements").isArray()
-                        ? (ArrayNode) shape.get("boundElements")
-                        : mapper.createArrayNode();
-                ObjectNode entry = mapper.createObjectNode();
-                entry.put("id", arrowId);
-                entry.put("type", "arrow");
-                bound.add(entry);
-                shape.set("boundElements", bound);
-                return;
-            }
+    private void registerBinding(ExportContext ctx, String shapeId, String arrowId) {
+        ObjectNode shape = ctx.shapeIndex.get(shapeId);
+        if (shape == null) {
+            log.warn("registerBinding: shape {} not found", shapeId);
+            return;
         }
+        ArrayNode bound = ensureBoundElements(shape);
+        ObjectNode entry = mapper.createObjectNode();
+        entry.put("id", arrowId);
+        entry.put("type", "arrow");
+        bound.add(entry);
     }
 
-    private void registerBoundText(ArrayNode elements, String containerId, String textId) {
-        for (JsonNode el : elements) {
-            if (containerId.equals(el.path("id").asText())) {
-                ObjectNode shape = (ObjectNode) el;
-                ArrayNode bound = shape.get("boundElements") != null && shape.get("boundElements").isArray()
-                        ? (ArrayNode) shape.get("boundElements")
-                        : mapper.createArrayNode();
-                ObjectNode entry = mapper.createObjectNode();
-                entry.put("id", textId);
-                entry.put("type", "text");
-                bound.add(entry);
-                shape.set("boundElements", bound);
-                return;
-            }
+    private void registerBoundText(ExportContext ctx, String containerId, String textId) {
+        ObjectNode shape = ctx.shapeIndex.get(containerId);
+        if (shape == null) {
+            log.warn("registerBoundText: container {} not found", containerId);
+            return;
         }
+        ArrayNode bound = ensureBoundElements(shape);
+        ObjectNode entry = mapper.createObjectNode();
+        entry.put("id", textId);
+        entry.put("type", "text");
+        bound.add(entry);
+    }
+
+    private ArrayNode ensureBoundElements(ObjectNode shape) {
+        JsonNode existing = shape.get("boundElements");
+        if (existing != null && existing.isArray()) return (ArrayNode) existing;
+        ArrayNode fresh = mapper.createArrayNode();
+        shape.set("boundElements", fresh);
+        return fresh;
     }
 
     // ====================================================================
-    //                       UTILITY HELPERS
+    //                       UTILITIES
     // ====================================================================
 
     private String newId() {
@@ -615,31 +775,37 @@ public class ExcalidrawMcpService {
     private String safeTrim(String s, int max) {
         if (s == null) return "";
         s = s.trim();
-        return s.length() > max ? s.substring(0, max - 1) + "…" : s;
+        return s.length() > max ? s.substring(0, Math.max(1, max - 1)) + "…" : s;
     }
 
     private String formatTime(double sec) {
-        int s = (int) sec;
-        return String.format("%d:%02d", s / 60, s % 60);
+        int s = Math.max(0, (int) sec);
+        return String.format(Locale.ROOT, "%d:%02d", s / 60, s % 60);
     }
 
     private String formatDuration(double sec) {
-        int s = (int) sec;
-        if (s < 3600) return String.format("%d:%02d", s / 60, s % 60);
-        return String.format("%d:%02d:%02d", s / 3600, (s % 3600) / 60, s % 60);
+        int s = Math.max(0, (int) sec);
+        if (s < 3600) return String.format(Locale.ROOT, "%d:%02d", s / 60, s % 60);
+        return String.format(Locale.ROOT, "%d:%02d:%02d", s / 3600, (s % 3600) / 60, s % 60);
     }
 
     private int computeTextHeight(String text, int width, int fontSize) {
+        if (text == null || text.isEmpty()) return fontSize * 2;
         int charsPerLine = Math.max(20, width / Math.max(1, fontSize / 2));
-        int lines = (int) Math.ceil((double) text.length() / charsPerLine);
+        int lines = Math.max(1, (int) Math.ceil((double) text.length() / charsPerLine));
         return lines * (int) (fontSize * 1.4);
     }
 
-    private String buildPdfLink(Path pdfPath, int topicNumber, double startTime) {
+    private int countBullets(TopicSection t) {
+        if (t.getBulletPoints() == null) return 0;
+        return Math.min(MAX_BULLETS_PER_TOPIC, t.getBulletPoints().size());
+    }
+
+    private String buildPdfLink(Path pdfPath, int pageNumber) {
         try {
-            String uri = pdfPath.toUri().toString();
-            return uri + "#page=" + Math.max(1, topicNumber);
+            return pdfPath.toUri().toString() + "#page=" + Math.max(1, pageNumber);
         } catch (Exception e) {
+            log.debug("Failed to build PDF link: {}", e.getMessage());
             return null;
         }
     }
@@ -656,11 +822,14 @@ public class ExcalidrawMcpService {
 
     private ObjectNode rectangle(String id, int x, int y, int w, int h,
                                  String bg, String stroke, String fillStyle,
-                                 int strokeWidth, int roundness, String frameId) {
+                                 int strokeWidth, int roundnessValue, String frameId) {
         ObjectNode n = baseShape(id, "rectangle", x, y, w, h, stroke, bg, fillStyle, strokeWidth, frameId);
-        if (roundness > 0) {
+        if (roundnessValue > 0) {
             ObjectNode r = mapper.createObjectNode();
             r.put("type", 3);
+            // FIX B1: Excalidraw rectangles use roundness {type: 3} only — NO "value"
+            // Custom radii would need value, but stock Excalidraw ignores it for type=3.
+            // Keep it simple: just type=3 for "rounded".
             n.set("roundness", r);
         } else {
             n.putNull("roundness");
@@ -669,7 +838,8 @@ public class ExcalidrawMcpService {
     }
 
     private ObjectNode ellipse(String id, int x, int y, int w, int h,
-                               String stroke, String bg, String fillStyle, int strokeWidth, String frameId) {
+                               String stroke, String bg, String fillStyle,
+                               int strokeWidth, String frameId) {
         ObjectNode n = baseShape(id, "ellipse", x, y, w, h, stroke, bg, fillStyle, strokeWidth, frameId);
         ObjectNode r = mapper.createObjectNode();
         r.put("type", 2);
@@ -700,7 +870,8 @@ public class ExcalidrawMcpService {
         n.put("versionNonce", rnd.nextInt(2_000_000));
         n.put("isDeleted", false);
         n.set("groupIds", mapper.createArrayNode());
-        if (frameId != null) n.put("frameId", frameId); else n.set("frameId", null);
+        if (frameId != null) n.put("frameId", frameId);
+        else n.set("frameId", null);
         n.set("boundElements", mapper.createArrayNode());
         n.put("updated", System.currentTimeMillis());
         n.set("link", null);
@@ -739,57 +910,35 @@ public class ExcalidrawMcpService {
         return n;
     }
 
+    /** Free-floating text (not bound to any container). */
     private ObjectNode text(String t, int x, int y, int fontSize, int width, int height,
-                            String color, String align, int weight, String frameId, String link) {
-        ObjectNode n = mapper.createObjectNode();
-        n.put("id", newId());
-        n.put("type", "text");
-        n.put("x", x);
-        n.put("y", y);
-        n.put("width", width);
-        n.put("height", height);
-        n.put("angle", 0);
-        n.put("strokeColor", color);
-        n.put("backgroundColor", "transparent");
-        n.put("fillStyle", "solid");
-        n.put("strokeWidth", 1);
-        n.put("strokeStyle", "solid");
-        n.put("roughness", 0);
-        n.put("opacity", 100);
-        n.put("seed", rnd.nextInt(2_000_000));
-        n.put("version", 1);
-        n.put("versionNonce", rnd.nextInt(2_000_000));
-        n.put("isDeleted", false);
-        n.set("groupIds", mapper.createArrayNode());
-        if (frameId != null) n.put("frameId", frameId); else n.set("frameId", null);
-        n.set("boundElements", mapper.createArrayNode());
-        n.put("updated", System.currentTimeMillis());
-        if (link != null) n.put("link", link); else n.set("link", null);
-        n.put("locked", false);
-        n.put("text", t == null ? "" : t);
-        n.put("fontSize", fontSize);
-        n.put("fontFamily", 2);
-        n.put("textAlign", align);
-        n.put("verticalAlign", "top");
-        n.put("baseline", (int) (fontSize * 0.85));
-        n.set("containerId", null);
-        n.put("originalText", t == null ? "" : t);
-        n.put("lineHeight", 1.25);
-        n.putNull("roundness");
+                            String color, String align, String frameId, String link) {
+        ObjectNode n = textBase(newId(), t, x, y, width, height, fontSize, color, align,
+                "top", null, frameId, link);
         return n;
     }
 
+    /** Text bound to a container shape — auto-wraps, auto-centers vertically. */
     private ObjectNode boundText(String textId, String containerId, String t,
                                  int containerX, int containerY,
                                  int containerW, int containerH,
-                                 int fontSize, String color, String align, String frameId) {
+                                 int fontSize, String color, String align) {
+        // I7 fix: bound text inherits frame from container — don't set frameId here.
+        // B8 fix: still pass container dims as text bounds; Excalidraw will handle layout.
+        return textBase(textId, t, containerX, containerY, containerW, containerH,
+                fontSize, color, align, "middle", containerId, null, null);
+    }
+
+    private ObjectNode textBase(String id, String t, int x, int y, int w, int h,
+                                int fontSize, String color, String align, String vAlign,
+                                String containerId, String frameId, String link) {
         ObjectNode n = mapper.createObjectNode();
-        n.put("id", textId);
+        n.put("id", id);
         n.put("type", "text");
-        n.put("x", containerX);
-        n.put("y", containerY);
-        n.put("width", containerW);
-        n.put("height", containerH);
+        n.put("x", x);
+        n.put("y", y);
+        n.put("width", w);
+        n.put("height", h);
         n.put("angle", 0);
         n.put("strokeColor", color);
         n.put("backgroundColor", "transparent");
@@ -803,20 +952,23 @@ public class ExcalidrawMcpService {
         n.put("versionNonce", rnd.nextInt(2_000_000));
         n.put("isDeleted", false);
         n.set("groupIds", mapper.createArrayNode());
-        if (frameId != null) n.put("frameId", frameId); else n.set("frameId", null);
+        if (frameId != null) n.put("frameId", frameId);
+        else n.set("frameId", null);
         n.set("boundElements", mapper.createArrayNode());
         n.put("updated", System.currentTimeMillis());
-        n.set("link", null);
+        if (link != null) n.put("link", link);
+        else n.set("link", null);
         n.put("locked", false);
         n.put("text", t == null ? "" : t);
         n.put("fontSize", fontSize);
-        n.put("fontFamily", 2);
+        n.put("fontFamily", 2);  // Helvetica
         n.put("textAlign", align);
-        n.put("verticalAlign", "middle");
+        n.put("verticalAlign", vAlign);
         n.put("baseline", (int) (fontSize * 0.85));
-        n.put("containerId", containerId);
+        if (containerId != null) n.put("containerId", containerId);
+        else n.set("containerId", null);
         n.put("originalText", t == null ? "" : t);
-        n.put("lineHeight", 1.4);
+        n.put("lineHeight", containerId != null ? 1.4 : 1.25);
         n.putNull("roundness");
         return n;
     }
@@ -842,7 +994,8 @@ public class ExcalidrawMcpService {
         n.put("versionNonce", rnd.nextInt(2_000_000));
         n.put("isDeleted", false);
         n.set("groupIds", mapper.createArrayNode());
-        if (frameId != null) n.put("frameId", frameId); else n.set("frameId", null);
+        if (frameId != null) n.put("frameId", frameId);
+        else n.set("frameId", null);
         n.set("boundElements", mapper.createArrayNode());
         n.put("updated", System.currentTimeMillis());
         n.set("link", null);
@@ -863,7 +1016,6 @@ public class ExcalidrawMcpService {
         return n;
     }
 
-    /** Standard elbow arrow with configurable end-point gap (controls how close to bound shape). */
     private ObjectNode elbowArrow(String id, int x1, int y1, int x2, int y2,
                                   String color, String startId, String endId,
                                   String frameId, int gap) {
@@ -889,8 +1041,9 @@ public class ExcalidrawMcpService {
         n.put("type", "arrow");
         n.put("x", x1);
         n.put("y", y1);
-        n.put("width", Math.abs(x2 - x1));
-        n.put("height", Math.abs(y2 - y1));
+        // I2 FIX: Excalidraw uses signed deltas; abs() was causing reverse rendering for some paths.
+        n.put("width", x2 - x1);
+        n.put("height", y2 - y1);
         n.put("angle", 0);
         n.put("strokeColor", color);
         n.put("backgroundColor", "transparent");
@@ -904,7 +1057,8 @@ public class ExcalidrawMcpService {
         n.put("versionNonce", rnd.nextInt(2_000_000));
         n.put("isDeleted", false);
         n.set("groupIds", mapper.createArrayNode());
-        if (frameId != null) n.put("frameId", frameId); else n.set("frameId", null);
+        if (frameId != null) n.put("frameId", frameId);
+        else n.set("frameId", null);
         n.set("boundElements", mapper.createArrayNode());
         n.put("updated", System.currentTimeMillis());
         n.set("link", null);
@@ -939,7 +1093,8 @@ public class ExcalidrawMcpService {
         }
 
         n.putNull("startArrowhead");
-        if (endHead != null) n.put("endArrowhead", endHead); else n.putNull("endArrowhead");
+        if (endHead != null) n.put("endArrowhead", endHead);
+        else n.putNull("endArrowhead");
         n.put("elbowed", elbowed);
         n.putNull("roundness");
         return n;
