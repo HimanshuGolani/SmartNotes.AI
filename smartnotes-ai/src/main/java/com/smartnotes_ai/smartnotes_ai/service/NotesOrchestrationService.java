@@ -159,8 +159,7 @@ public class NotesOrchestrationService {
 
         Path pdfPath = getPdfPath(videoId);
         Path excalidrawPath = getExcalidrawPath(videoId);
-        Path metaPath = videoDir.resolve("meta.json");  // optional, see note below
-
+        
         boolean needPdf = request.isExportPdf();
         boolean needExcalidraw = request.isExportExcalidraw();
 
