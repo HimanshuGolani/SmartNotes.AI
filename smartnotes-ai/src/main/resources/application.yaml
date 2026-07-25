@@ -37,4 +37,6 @@ smartnotes:
 
 logging:
   level:
-    com.smartnotes: DEBUG
+    com.smartnotes_ai: DEBUG
+  pattern:
+    console: "%d{HH:mm:ss.SSS} %highlight(%-5level) [%X{jobId:--}/%X{videoId:--}] %cyan(%-35logger{35}) - %msg%n"

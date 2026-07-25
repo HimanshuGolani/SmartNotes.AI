@@ -1,15 +1,17 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { motion } from 'framer-motion';
+import { subscribeToProgress, fetchResult } from '../api/notesApi';
 
-const STAGES = [
-  { id: 1, label: 'Downloading metadata', icon: '🌐', duration: 5 },
-  { id: 2, label: 'Extracting transcript', icon: '🎙️', duration: 10 },
-  { id: 3, label: 'Capturing key frames', icon: '🖼️', duration: 15 },
-  { id: 4, label: 'Vision analysis', icon: '👁️', duration: 30 },
-  { id: 5, label: 'Aligning context', icon: '🔗', duration: 5 },
-  { id: 6, label: 'Generating topics with AI', icon: '🧠', duration: 60 },
-  { id: 7, label: 'Crafting PDF document', icon: '📄', duration: 8 },
-  { id: 8, label: 'Building mind-map', icon: '🎨', duration: 10 },
+const STAGE_ICONS = ['🔍', '⬇️', '🖼️', '🎙️', '🔗', '🧠', '👁️', '📄'];
+const STAGE_LABELS = [
+  'Checking cache',
+  'Downloading video',
+  'Extracting frames',
+  'Transcribing audio',
+  'Aligning context',
+  'Generating topics with AI',
+  'Analysing key frames',
+  'Exporting documents',
 ];
 
 const formatTime = (s) => {
@@ -18,33 +20,50 @@ const formatTime = (s) => {
   return `${m}:${String(sec).padStart(2, '0')}`;
 };
 
-export default function ProcessingStatus({ startedAt }) {
+export default function ProcessingStatus({ jobId, onComplete, onError }) {
   const [elapsed, setElapsed] = useState(0);
   const [activeStage, setActiveStage] = useState(0);
+  const [stageMessage, setStageMessage] = useState('Starting…');
+  const [percent, setPercent] = useState(0);
+  const startedAtRef = useRef(Date.now());
+  const cleanupRef = useRef(null);
 
+  // Elapsed timer
   useEffect(() => {
     const t = setInterval(() => {
-      setElapsed(Math.floor((Date.now() - startedAt) / 1000));
+      setElapsed(Math.floor((Date.now() - startedAtRef.current) / 1000));
     }, 1000);
     return () => clearInterval(t);
-  }, [startedAt]);
+  }, []);
 
+  // SSE subscription
   useEffect(() => {
-    let cumulative = 0;
-    let stage = 0;
-    for (let i = 0; i < STAGES.length; i++) {
-      cumulative += STAGES[i].duration;
-      if (elapsed < cumulative) {
-        stage = i;
-        break;
-      }
-      stage = i;
-    }
-    setActiveStage(stage);
-  }, [elapsed]);
+    if (!jobId) return;
 
-  const totalEstimate = STAGES.reduce((acc, s) => acc + s.duration, 0);
-  const progress = Math.min(100, (elapsed / totalEstimate) * 100);
+    const cleanup = subscribeToProgress(jobId, {
+      onProgress: ({ stage, message, percent: pct }) => {
+        setActiveStage(Math.min(stage, STAGE_LABELS.length - 1));
+        setStageMessage(message);
+        setPercent(pct);
+      },
+      onComplete: async () => {
+        setPercent(100);
+        setStageMessage('Done!');
+        try {
+          const result = await fetchResult(jobId);
+          onComplete && onComplete(result);
+        } catch (e) {
+          onError && onError('Processing finished but result could not be fetched: ' + e.message);
+        }
+      },
+      onError: (msg) => {
+        onError && onError(msg);
+      },
+    });
+
+    cleanupRef.current = cleanup;
+    return () => cleanup();
+  }, [jobId]);
 
   return (
     <motion.div
@@ -76,7 +95,7 @@ export default function ProcessingStatus({ startedAt }) {
           Crafting your notes
         </h2>
         <p style={{ color: 'var(--text-secondary)', fontSize: '14px', marginTop: '8px' }}>
-          AI is hard at work. Sit back and relax.
+          {stageMessage}
         </p>
       </div>
 
@@ -92,14 +111,11 @@ export default function ProcessingStatus({ startedAt }) {
         }}
       >
         <motion.div
-          initial={{ width: '0%' }}
-          animate={{ width: `${progress}%` }}
-          transition={{ duration: 1, ease: 'easeOut' }}
+          animate={{ width: `${percent}%` }}
+          transition={{ duration: 0.8, ease: 'easeOut' }}
           style={{
             height: '100%',
             background: 'linear-gradient(90deg, #7048e8, #60a5fa, #34d399)',
-            backgroundSize: '200% 100%',
-            animation: 'gradient-shift 3s ease infinite',
             borderRadius: '4px',
           }}
         />
@@ -150,7 +166,7 @@ export default function ProcessingStatus({ startedAt }) {
           <div
             style={{ fontSize: '11px', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.1em' }}
           >
-            Est. Remaining
+            Progress
           </div>
           <div
             style={{
@@ -161,22 +177,22 @@ export default function ProcessingStatus({ startedAt }) {
               marginTop: '4px',
             }}
           >
-            ~{formatTime(Math.max(0, totalEstimate - elapsed))}
+            {percent}%
           </div>
         </div>
       </div>
 
       {/* Stages */}
       <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-        {STAGES.map((stage, idx) => {
+        {STAGE_LABELS.map((label, idx) => {
           const isActive = idx === activeStage;
           const isDone = idx < activeStage;
           return (
             <motion.div
-              key={stage.id}
+              key={idx}
               initial={{ opacity: 0, x: -20 }}
               animate={{ opacity: 1, x: 0 }}
-              transition={{ delay: idx * 0.05 }}
+              transition={{ delay: idx * 0.04 }}
               style={{
                 display: 'flex',
                 alignItems: 'center',
@@ -195,10 +211,10 @@ export default function ProcessingStatus({ startedAt }) {
               }}
             >
               <div style={{ fontSize: '20px' }}>
-                {isDone ? '✅' : isActive ? stage.icon : '⏳'}
+                {isDone ? '✅' : isActive ? STAGE_ICONS[idx] : '⏳'}
               </div>
               <div style={{ flex: 1, fontSize: '14px', fontWeight: isActive ? 600 : 400 }}>
-                {stage.label}
+                {label}
               </div>
               {isActive && (
                 <div className="loading-dots">
@@ -224,7 +240,7 @@ export default function ProcessingStatus({ startedAt }) {
           textAlign: 'center',
         }}
       >
-        ⏱ Stage durations are estimates. Long videos take longer.
+        ⏱ Long videos take longer. The AI is doing real work — please wait.
       </div>
     </motion.div>
   );

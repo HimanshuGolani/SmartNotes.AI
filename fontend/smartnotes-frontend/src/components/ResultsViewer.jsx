@@ -2,22 +2,20 @@ import React, { useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import PdfViewer from './PdfViewer';
 import ExcalidrawViewer from './ExcalidrawViewer';
+import TopicsViewer from './TopicsViewer';
 import { getPdfUrl, getExcalidrawUrl, downloadFile } from '../api/notesApi';
 
 export default function ResultsViewer({ result, onReset }) {
-  const [activeTab, setActiveTab] = useState(result.pdfPath ? 'pdf' : 'excalidraw');
+  const hasTopics = Boolean(result.topics && result.topics.length > 0);
+  const defaultTab = result.pdfPath ? 'pdf' : result.excalidrawPath ? 'excalidraw' : hasTopics ? 'topics' : 'pdf';
+  const [activeTab, setActiveTab] = useState(defaultTab);
 
   const videoId = result.videoId;
   const hasPdf = Boolean(result.pdfPath);
   const hasExcalidraw = Boolean(result.excalidrawPath);
 
-  const handleDownloadPdf = () => {
-    downloadFile(getPdfUrl(videoId), `${videoId}-notes.pdf`);
-  };
-
-  const handleDownloadExcalidraw = () => {
-    downloadFile(getExcalidrawUrl(videoId), `${videoId}-notes.excalidraw`);
-  };
+  const handleDownloadPdf = () => downloadFile(getPdfUrl(videoId), `${videoId}-notes.pdf`);
+  const handleDownloadExcalidraw = () => downloadFile(getExcalidrawUrl(videoId), `${videoId}-notes.excalidraw`);
 
   return (
     <motion.div
@@ -71,7 +69,9 @@ export default function ResultsViewer({ result, onReset }) {
             {result.title || 'Notes Generated'}
           </h2>
           <div style={{ fontSize: '13px', color: 'var(--text-secondary)' }}>
-            {result.topicCount} topics · {Math.round(result.processingTimeSeconds)}s processing time
+            {result.topicCount > 0 && `${result.topicCount} topics · `}
+            {result.processingTimeSeconds > 0 && `${Math.round(result.processingTimeSeconds)}s processing time`}
+            {result.cached && ' · loaded from cache'}
           </div>
         </div>
 
@@ -136,16 +136,24 @@ export default function ResultsViewer({ result, onReset }) {
             label="Mind Map"
           />
         )}
+        {hasTopics && (
+          <TabButton
+            active={activeTab === 'topics'}
+            onClick={() => setActiveTab('topics')}
+            icon="📋"
+            label="Topics"
+          />
+        )}
       </div>
 
       {/* Viewer */}
       <div
         className="glass"
         style={{
-          height: 'calc(100vh - 240px)',
-          minHeight: '600px',
-          padding: '8px',
-          overflow: 'hidden',
+          height: activeTab === 'topics' ? 'auto' : 'calc(100vh - 240px)',
+          minHeight: '400px',
+          padding: activeTab === 'topics' ? '16px' : '8px',
+          overflow: activeTab === 'topics' ? 'visible' : 'hidden',
         }}
       >
         <AnimatePresence mode="wait">
@@ -173,6 +181,17 @@ export default function ResultsViewer({ result, onReset }) {
               <ExcalidrawViewer videoId={videoId} />
             </motion.div>
           )}
+          {activeTab === 'topics' && hasTopics && (
+            <motion.div
+              key="topics"
+              initial={{ opacity: 0, x: -20 }}
+              animate={{ opacity: 1, x: 0 }}
+              exit={{ opacity: 0, x: 20 }}
+              transition={{ duration: 0.3 }}
+            >
+              <TopicsViewer topics={result.topics} />
+            </motion.div>
+          )}
         </AnimatePresence>
       </div>
     </motion.div>
@@ -195,6 +214,7 @@ function TabButton({ active, onClick, icon, label }) {
         display: 'flex',
         alignItems: 'center',
         gap: '8px',
+        cursor: 'pointer',
       }}
     >
       <span>{icon}</span>

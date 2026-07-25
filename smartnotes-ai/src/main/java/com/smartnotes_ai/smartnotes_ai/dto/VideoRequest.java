@@ -9,5 +9,6 @@ public class VideoRequest {
     private String youtubeUrl;
     private boolean exportPdf = true;
     private boolean exportExcalidraw = false;
-    private Integer frameIntervalSeconds; // optional override
+    private Integer frameIntervalSeconds;
+    private boolean forceRefresh = false;
 }

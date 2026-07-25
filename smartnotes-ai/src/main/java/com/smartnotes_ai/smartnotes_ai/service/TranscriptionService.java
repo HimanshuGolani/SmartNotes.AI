@@ -52,7 +52,7 @@ public class TranscriptionService {
             ensureWhisperRunning();
 
             // Step 2: POST audio file to Whisper
-            log.info("Sending audio file to Whisper: {}", audioFile.getFileName());
+            log.info("Sending audio | file={}", audioFile.getFileName());
 
             MultiValueMap<String, Object> body = new LinkedMultiValueMap<>();
             body.add("file", new FileSystemResource(audioFile));
@@ -77,7 +77,7 @@ public class TranscriptionService {
                 ));
             }
 
-            log.info("Transcribed {} segments", result.size());
+            log.info("Transcription complete | segments={}", result.size());
             return result;
 
         } catch (Exception e) {
@@ -130,11 +130,11 @@ public class TranscriptionService {
     public void ensureWhisperRunning() {
         // Fast path: if it's already healthy (HTTP 200), proceed immediately
         if (isWhisperHealthy()) {
-            log.info("Whisper is already running ✓ proceeding to transcription.");
+            log.info("Whisper healthy | url={}", whisperUrl);
             return;
         }
 
-        log.warn("Whisper is NOT healthy. Triggering auto-start...");
+        log.warn("Whisper unhealthy | triggering auto-start url={}", whisperUrl);
 
         // Atomic flag prevents two parallel requests from both spawning the .bat
         if (whisperStarting.compareAndSet(false, true)) {
@@ -187,7 +187,7 @@ public class TranscriptionService {
             }
 
             long totalSeconds = (System.currentTimeMillis() - startTime) / 1000;
-            log.info("✓ Whisper is healthy! (took {}s, {} attempts)", totalSeconds, attempts);
+            log.info("Whisper ready | elapsed={}s attempts={}", totalSeconds, attempts);
 
         } finally {
             whisperStarting.set(false);

@@ -1,0 +1,12 @@
+package com.smartnotes_ai.smartnotes_ai.exception;
+
+public enum ErrorCode {
+    VIDEO_DOWNLOAD_FAILED,
+    FRAME_EXTRACTION_FAILED,
+    TRANSCRIPTION_FAILED,
+    NOTES_GENERATION_FAILED,
+    PDF_EXPORT_FAILED,
+    EXCALIDRAW_EXPORT_FAILED,
+    JOB_NOT_FOUND,
+    INVALID_REQUEST
+}

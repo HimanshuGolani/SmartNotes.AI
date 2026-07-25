@@ -17,32 +17,43 @@ const STAGES = {
 
 export default function App() {
   const [stage, setStage] = useState(STAGES.WELCOME);
+  const [jobId, setJobId] = useState(null);
   const [result, setResult] = useState(null);
   const [error, setError] = useState(null);
-  const [startedAt, setStartedAt] = useState(null);
 
   const handleSubmit = async (payload) => {
-    setStage(STAGES.PROCESSING);
-    setStartedAt(Date.now());
     setError(null);
+    setResult(null);
     try {
-      const data = await generateNotes(payload);
-      setResult(data);
-      setStage(STAGES.RESULTS);
+      // Fast call — returns { jobId } in < 1s (202 Accepted)
+      const { jobId: id } = await generateNotes(payload);
+      setJobId(id);
+      setStage(STAGES.PROCESSING);
     } catch (err) {
       console.error(err);
       setError(
         err?.response?.data?.message ||
           err?.message ||
-          'Something went wrong. Check the backend logs.'
+          'Could not start processing. Check the backend is running.'
       );
       setStage(STAGES.ERROR);
     }
   };
 
+  const handleComplete = (data) => {
+    setResult(data);
+    setStage(STAGES.RESULTS);
+  };
+
+  const handleError = (msg) => {
+    setError(msg || 'Processing failed. Check the backend logs.');
+    setStage(STAGES.ERROR);
+  };
+
   const handleReset = () => {
     setResult(null);
     setError(null);
+    setJobId(null);
     setStage(STAGES.INPUT);
   };
 
@@ -82,7 +93,11 @@ export default function App() {
               padding: '40px 20px',
             }}
           >
-            <ProcessingStatus startedAt={startedAt} />
+            <ProcessingStatus
+              jobId={jobId}
+              onComplete={handleComplete}
+              onError={handleError}
+            />
           </div>
         )}
 

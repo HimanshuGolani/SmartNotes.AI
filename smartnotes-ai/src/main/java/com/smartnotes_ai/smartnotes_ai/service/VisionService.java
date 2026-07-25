@@ -30,8 +30,10 @@ public class VisionService {
                     .data(new FileSystemResource(imagePath))
                     .build();
 
-            String text = "Describe this video frame in 1-2 short sentences. " +
-                    "Focus on key text, diagrams, or actions visible. " +
+            String text = "Describe only what is visible in this frame. " +
+                    "Output a single plain sentence with no preamble — " +
+                    "do not start with 'I can see', 'The image shows', 'In this frame', or similar phrases. " +
+                    "Focus on: text on screen, diagrams, UI elements, code, or speaker actions. " +
                     "Topic context: " + topicHint;
 
             UserMessage userMessage = UserMessage.builder()

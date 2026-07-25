@@ -67,18 +67,18 @@ public class NotesGenerationService {
                                              String alignedContext,
                                              String title) {
         if (segments == null || segments.isEmpty()) {
-            log.warn("No transcript segments available - returning empty topics");
+            log.warn("generateTopics skipped | reason=no-segments");
             return List.of();
         }
 
         double totalDuration = segments.get(segments.size() - 1).getEnd();
-        log.info("Generating topics for {}s of video, {} segments", totalDuration, segments.size());
+        log.info("generateTopics | duration={}s segments={}", (int) totalDuration, segments.size());
 
         int windowSec = Math.max(60, (int) (totalDuration / 8));
-        log.info("Using window size: {}s", windowSec);
+        log.info("Window config | windowSec={}", windowSec);
 
         List<List<TranscriptSegment>> windows = splitIntoWindows(segments, windowSec);
-        log.info("Split into {} time windows", windows.size());
+        log.info("Windows created | count={}", windows.size());
 
         List<TopicSection> allTopics = new ArrayList<>();
         String contextSnippet = alignedContext == null ? "" :
@@ -95,7 +95,7 @@ public class NotesGenerationService {
                     .map(s -> String.format(Locale.ROOT, "[%.0fs] %s", s.getStart(), s.getText()))
                     .collect(Collectors.joining("\n"));
 
-            log.info("Generating topics for window {}/{} ({}s-{}s, {} chars)",
+            log.info("Processing window | index={}/{} start={}s end={}s chars={}",
                     i + 1, windows.size(), (int) startSec, (int) endSec, windowText.length());
 
             try {
@@ -107,24 +107,24 @@ public class NotesGenerationService {
                         .replace("%%TRANSCRIPT%%", windowText);
 
                 String response = chatModel.call(prompt);
-                log.debug("LLM response (window {}): {}", i + 1,
-                        response.length() > 500 ? response.substring(0, 500) + "..." : response);
+                log.debug("LLM response | window={} chars={}",
+                        i + 1, response.length());
 
                 List<TopicSection> windowTopics = parseTopics(response, startSec, endSec, windowText);
                 if (windowTopics.isEmpty()) {
-                    log.warn("Window {} returned 0 topics, creating fallback", i + 1);
+                    log.warn("No topics parsed | window={} using=fallback", i + 1);
                     windowTopics.add(createFallbackTopic(startSec, endSec, windowText, response));
                 }
-                log.info("Window {} → {} topics extracted", i + 1, windowTopics.size());
+                log.info("Topics extracted | window={} count={}", i + 1, windowTopics.size());
                 allTopics.addAll(windowTopics);
             } catch (Exception e) {
-                log.error("Failed window {}: {}", i + 1, e.getMessage(), e);
+                log.error("Window processing failed | window={} error={}", i + 1, e.getMessage(), e);
                 allTopics.add(createFallbackTopic(startSec, endSec, windowText, ""));
             }
         }
 
         List<TopicSection> deduped = deduplicate(allTopics);
-        log.info("Total topics generated: {} (after dedup)", deduped.size());
+        log.info("Topics finalized | total={} (after dedup)", deduped.size());
         return deduped;
     }
 

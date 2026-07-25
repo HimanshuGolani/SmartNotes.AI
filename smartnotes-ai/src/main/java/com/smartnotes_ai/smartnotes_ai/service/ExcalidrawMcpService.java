@@ -125,6 +125,9 @@ public class ExcalidrawMcpService {
     private static final int MAX_BULLETS_PER_TOPIC = 4;
     private static final int MAX_CROSS_REFS = 3;
     private static final double SIMILARITY_THRESHOLD = 0.72;
+    private static final int CAPTION_H = 60;
+    private static final int CAPTION_GAP = 14;
+    private static final int TOPIC_H_MIN = 200;
 
     // ============== PUBLIC ENTRY POINTS ==============
 
@@ -149,10 +152,14 @@ public class ExcalidrawMcpService {
             // Phase 1: Semantic analysis
             analyzeSemantics(ctx);
 
-            // Phase 2: Layout
+            // Phase 2: Layout — use max dynamic card height for consistent row spacing
+            int maxTopicH = ctx.topicHeights.isEmpty() ? TOPIC_H : Collections.max(ctx.topicHeights);
+            boolean anyCaption = ctx.topics.stream()
+                    .anyMatch(t -> t.getScreenshotCaption() != null && !t.getScreenshotCaption().isBlank());
+            int cellTopicH = maxTopicH + (anyCaption ? CAPTION_H + CAPTION_GAP : 0);
             ctx.layout = (ctx.topicCount > 8)
-                    ? computeHierarchicalLayout(ctx.topicCount)
-                    : computeGridLayout(ctx.topicCount);
+                    ? computeHierarchicalLayout(ctx.topicCount, cellTopicH)
+                    : computeGridLayout(ctx.topicCount, cellTopicH);
 
             // Phase 3: Build elements (in z-order via 3 layers)
             int contentX = LEGEND_W + LEGEND_PAD * 2 + CANVAS_PAD;
@@ -229,6 +236,9 @@ public class ExcalidrawMcpService {
         List<Theme> themes;
         List<int[]> semanticLinks = List.of();
 
+        // Per-topic computed card heights (populated in analyzeSemantics)
+        final List<Integer> topicHeights = new ArrayList<>();
+
         // Layout
         Layout layout;
         final List<String> topicIds = new ArrayList<>();
@@ -271,6 +281,18 @@ public class ExcalidrawMcpService {
                 log.warn("Semantic analysis skipped: {}", e.getMessage());
                 ctx.semanticLinks = List.of();
             }
+        }
+        computeTopicHeights(ctx);
+    }
+
+    private void computeTopicHeights(ExportContext ctx) {
+        ctx.topicHeights.clear();
+        for (TopicSection t : ctx.topics) {
+            String summary = t.getSummary() == null ? "" : t.getSummary();
+            // title row + metadata row + summary text + top/bottom padding
+            int textH = computeTextHeight(summary, TOPIC_W - 48, 13);
+            int h = Math.max(TOPIC_H_MIN, textH + 80);
+            ctx.topicHeights.add(h);
         }
     }
 
@@ -354,11 +376,16 @@ public class ExcalidrawMcpService {
         String groupId = "grp-" + i + "-" + newId();
         ArrayNode grpArr = listToJsonArray(List.of(groupId));
 
+        // Dynamic card height computed per-topic
+        int topicH = ctx.topicHeights.isEmpty() ? TOPIC_H : ctx.topicHeights.get(i);
+        boolean hasCaption = t.getScreenshotCaption() != null && !t.getScreenshotCaption().isBlank();
+        int captionExtra = hasCaption ? CAPTION_H + CAPTION_GAP : 0;
+
         // Frame sizing
         int bulletCount = countBullets(t);
         int bulletColH = bulletCount * (BULLET_H + BULLET_GAP);
         int frameW = TOPIC_W + BULLET_W + STICKY_OFFSET + 2 * FRAME_PAD;
-        int frameH = Math.max(TOPIC_H, bulletColH) + 2 * FRAME_PAD + 30;
+        int frameH = Math.max(topicH, bulletColH) + 2 * FRAME_PAD + 30 + captionExtra;
         int frameX = bx - FRAME_PAD;
         int frameY = by - FRAME_PAD - 25;
 
@@ -372,7 +399,7 @@ public class ExcalidrawMcpService {
         String boxId = newId();
         ctx.topicIds.add(boxId);
         String pdfLink = (ctx.pdfPath != null) ? buildPdfLink(ctx.pdfPath, i + 1) : null;
-        ObjectNode card = rectangle(boxId, bx, by, TOPIC_W, TOPIC_H,
+        ObjectNode card = rectangle(boxId, bx, by, TOPIC_W, topicH,
                 fill, stroke, "solid", 2, 12, frameId);
         card.set("groupIds", grpArr.deepCopy());
         if (pdfLink != null) card.put("link", pdfLink);
@@ -389,7 +416,7 @@ public class ExcalidrawMcpService {
 
         String cardTextId = newId();
         ObjectNode cardText = boundText(cardTextId, boxId, content,
-                bx, by, TOPIC_W, TOPIC_H, 13, darkText, "left");
+                bx, by, TOPIC_W, topicH, 13, darkText, "left");
         cardText.set("groupIds", grpArr.deepCopy());
         ctx.addText(cardText);
         registerBoundText(ctx, boxId, cardTextId);
@@ -442,6 +469,24 @@ public class ExcalidrawMcpService {
                 registerBinding(ctx, stickyId, arrId);
             }
         }
+
+        // Screenshot caption sticky — rendered below the topic card
+        if (hasCaption) {
+            int captionY = by + topicH + CAPTION_GAP;
+            String captionId = newId();
+            ObjectNode captionBox = rectangle(captionId, bx, captionY, TOPIC_W, CAPTION_H,
+                    "#f8f9fa", stroke, "dashed", 1, 4, frameId);
+            captionBox.set("groupIds", grpArr.deepCopy());
+            ctx.addShape(captionBox);
+
+            String captionTextId = newId();
+            ObjectNode captionText = boundText(captionTextId, captionId,
+                    "📸 " + safeTrim(t.getScreenshotCaption(), 200),
+                    bx, captionY, TOPIC_W, CAPTION_H, 10, "#495057", "left");
+            captionText.set("groupIds", grpArr.deepCopy());
+            ctx.addText(captionText);
+            registerBoundText(ctx, captionId, captionTextId);
+        }
     }
 
     private void buildHubArrows(ExportContext ctx, int x, int topicsTopY) {
@@ -476,9 +521,11 @@ public class ExcalidrawMcpService {
             int[] fromPos = ctx.layout.positions.get(from);
             int[] toPos = ctx.layout.positions.get(to);
             int fromX = x + fromPos[0];
-            int fromY = topicsTopY + fromPos[1] + TOPIC_H / 2;
+            int fromCardH = ctx.topicHeights.isEmpty() ? TOPIC_H : ctx.topicHeights.get(from);
+            int toCardH = ctx.topicHeights.isEmpty() ? TOPIC_H : ctx.topicHeights.get(to);
+            int fromY = topicsTopY + fromPos[1] + fromCardH / 2;
             int toX = x + toPos[0];
-            int toY = topicsTopY + toPos[1] + TOPIC_H / 2;
+            int toY = topicsTopY + toPos[1] + toCardH / 2;
 
             String arrId = newId();
             ObjectNode arr = dashedReferenceArrow(arrId, fromX, fromY, toX, toY,
@@ -601,7 +648,7 @@ public class ExcalidrawMcpService {
         return 4;
     }
 
-    private Layout computeGridLayout(int n) {
+    private Layout computeGridLayout(int n, int topicH) {
         Layout l = new Layout();
         l.strategy = LayoutStrategy.GRID;
         if (n == 0) {
@@ -612,7 +659,7 @@ public class ExcalidrawMcpService {
         int cols = computeGridCols(n);
         int rows = (int) Math.ceil((double) n / cols);
         int cellW = TOPIC_W + BULLET_W + STICKY_OFFSET + 2 * FRAME_PAD;
-        int cellH = TOPIC_H + 2 * FRAME_PAD + 60;
+        int cellH = topicH + 2 * FRAME_PAD + 60;
 
         for (int i = 0; i < n; i++) {
             int row = i / cols;
@@ -626,7 +673,7 @@ public class ExcalidrawMcpService {
         return l;
     }
 
-    private Layout computeHierarchicalLayout(int n) {
+    private Layout computeHierarchicalLayout(int n, int topicH) {
         Layout l = new Layout();
         l.strategy = LayoutStrategy.HIERARCHICAL;
         if (n == 0) {
@@ -639,7 +686,7 @@ public class ExcalidrawMcpService {
         int perLayer = (int) Math.ceil((double) n / layers);
 
         int cellW = TOPIC_W + BULLET_W + STICKY_OFFSET + 2 * FRAME_PAD;
-        int cellH = TOPIC_H + 2 * FRAME_PAD + 60;
+        int cellH = topicH + 2 * FRAME_PAD + 60;
         int laneSpacing = H_GAP;
         int layerSpacing = V_GAP + 60;
 
@@ -965,8 +1012,13 @@ public class ExcalidrawMcpService {
         n.put("textAlign", align);
         n.put("verticalAlign", vAlign);
         n.put("baseline", (int) (fontSize * 0.85));
-        if (containerId != null) n.put("containerId", containerId);
-        else n.set("containerId", null);
+        if (containerId != null) {
+            n.put("containerId", containerId);
+            // autoResize lets the container expand when text overflows — fixes box sizing issue
+            n.put("autoResize", true);
+        } else {
+            n.set("containerId", null);
+        }
         n.put("originalText", t == null ? "" : t);
         n.put("lineHeight", containerId != null ? 1.4 : 1.25);
         n.putNull("roundness");

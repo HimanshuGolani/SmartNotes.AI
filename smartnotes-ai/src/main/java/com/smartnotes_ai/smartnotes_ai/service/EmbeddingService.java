@@ -2,24 +2,23 @@ package com.smartnotes_ai.smartnotes_ai.service;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.ObjectNode;
+import jakarta.annotation.PostConstruct;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.http.HttpEntity;
-import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
 import org.springframework.stereotype.Service;
-import org.springframework.web.client.RestTemplate;
+import org.springframework.web.client.RestClient;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 
 @Slf4j
 @Service
 public class EmbeddingService {
 
-    private final RestTemplate rest = new RestTemplate();
     private final ObjectMapper mapper = new ObjectMapper();
+    private RestClient restClient;
 
     @Value("${smartnotes.ollama.url}")
     private String ollamaUrl;
@@ -27,18 +26,25 @@ public class EmbeddingService {
     @Value("${smartnotes.ollama.embed-model}")
     private String embedModel;
 
-    /** Get embedding for a single text. Returns empty array on failure. */
+    @PostConstruct
+    private void init() {
+        this.restClient = RestClient.create();
+    }
+
     public double[] embed(String text) {
         try {
-            ObjectNode body = mapper.createObjectNode();
-            body.put("model", embedModel);
-            body.put("prompt", text == null ? "" : text);
+            String requestBody = mapper.writeValueAsString(Map.of(
+                    "model", embedModel,
+                    "prompt", text == null ? "" : text
+            ));
 
-            HttpHeaders headers = new HttpHeaders();
-            headers.setContentType(MediaType.APPLICATION_JSON);
-            HttpEntity<String> entity = new HttpEntity<>(mapper.writeValueAsString(body), headers);
+            String response = restClient.post()
+                    .uri(ollamaUrl + "/api/embeddings")
+                    .contentType(MediaType.APPLICATION_JSON)
+                    .body(requestBody)
+                    .retrieve()
+                    .body(String.class);
 
-            String response = rest.postForObject(ollamaUrl + "/api/embeddings", entity, String.class);
             JsonNode root = mapper.readTree(response);
             JsonNode emb = root.path("embedding");
             if (!emb.isArray()) return new double[0];
@@ -46,8 +52,9 @@ public class EmbeddingService {
             double[] vec = new double[emb.size()];
             for (int i = 0; i < emb.size(); i++) vec[i] = emb.get(i).asDouble();
             return vec;
+
         } catch (Exception e) {
-            log.warn("Embedding failed: {}", e.getMessage());
+            log.warn("Embedding request failed | model={} error={}", embedModel, e.getMessage());
             return new double[0];
         }
     }
