@@ -5,7 +5,10 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.smartnotes_ai.smartnotes_ai.dto.TopicSection;
 import com.smartnotes_ai.smartnotes_ai.dto.TranscriptSegment;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.ai.chat.messages.UserMessage;
+import org.springframework.ai.chat.prompt.Prompt;
 import org.springframework.ai.ollama.OllamaChatModel;
+import org.springframework.ai.ollama.api.OllamaOptions;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Service;
 
@@ -29,8 +32,8 @@ public class NotesGenerationService {
 
     // Use simple placeholders like %%TITLE%% that won't conflict with JSON braces
     private static final String TOPIC_PROMPT = """
-            You are an expert note-taker. Analyze the following part of a video transcript
-            and extract 1 to 3 main topic sections.
+            You are an expert note-taker creating comprehensive study material. \
+            Analyze the following video transcript window and extract 2 to 4 main topic sections.
 
             VIDEO TITLE: %%TITLE%%
             CONTEXT: %%CONTEXT%%
@@ -41,21 +44,36 @@ public class NotesGenerationService {
             CRITICAL: Return ONLY a valid JSON array. No markdown fences. No explanation. No preamble.
             Start your response with [ and end with ].
 
-            Required structure:
+            Required JSON structure:
             [
               {
-                "title": "Concise topic title (max 60 chars)",
-                "summary": "2-3 sentence summary of what is discussed",
-                "bulletPoints": ["key point 1", "key point 2", "key point 3", "key point 4"],
-                "startTime": <number>,
-                "endTime": <number>
+                "title": "Clear, specific topic title (max 60 chars)",
+                "summary": "3-4 sentence summary covering: what is being discussed, the core concept or technique introduced, why it matters, and how it connects to the broader subject.",
+                "bulletPoints": [
+                  "Complete sentence stating a specific fact, definition, or technique from this segment",
+                  "Another concrete detail: what it does, how it works, or why it is used",
+                  "Third key insight including any examples, numbers, or comparisons mentioned",
+                  "Fourth point covering a practical application, limitation, or common mistake",
+                  "Fifth point if the content is rich enough to warrant it",
+                  "Sixth point for any additional important detail not covered above"
+                ],
+                "startTime": <number from transcript>,
+                "endTime": <number from transcript>
               }
             ]
+
+            Guidelines:
+            - Include 4 to 6 bulletPoints depending on content richness — never fewer than 4
+            - Every bulletPoint must be a full, standalone sentence (not a label or fragment)
+            - Use exact timestamps from the transcript for startTime and endTime
+            - Do not fabricate information not present in the transcript
             """;
 
     private static final String OVERALL_PROMPT = """
             Below are topic-wise notes from a video titled "%%TITLE%%".
-            Write a 3-4 sentence executive summary of the entire video.
+            Write a 4-5 sentence executive summary that covers: the main theme or problem addressed, \
+            the key concepts or techniques explained, the most important practical takeaways, \
+            and what a viewer should be able to do or understand after watching.
 
             TOPICS:
             %%TOPICS%%
@@ -99,14 +117,21 @@ public class NotesGenerationService {
                     i + 1, windows.size(), (int) startSec, (int) endSec, windowText.length());
 
             try {
-                String prompt = TOPIC_PROMPT
+                String promptText = TOPIC_PROMPT
                         .replace("%%TITLE%%", title == null ? "" : title)
                         .replace("%%CONTEXT%%", contextSnippet)
                         .replace("%%START%%", String.valueOf((int) startSec))
                         .replace("%%END%%", String.valueOf((int) endSec))
                         .replace("%%TRANSCRIPT%%", windowText);
 
-                String response = chatModel.call(prompt);
+                // temperature=0.1 for deterministic JSON; numPredict caps token spend per window
+                OllamaOptions opts = OllamaOptions.builder()
+                        .temperature(0.1)
+                        .numPredict(2200)
+                        .build();
+                String response = chatModel
+                        .call(new Prompt(List.of(new UserMessage(promptText)), opts))
+                        .getResult().getOutput().getText();
                 log.debug("LLM response | window={} chars={}",
                         i + 1, response.length());
 
@@ -136,10 +161,16 @@ public class NotesGenerationService {
                 .map(t -> "- " + t.getTitle() + ": " + (t.getSummary() == null ? "" : t.getSummary()))
                 .collect(Collectors.joining("\n"));
         try {
-            String prompt = OVERALL_PROMPT
+            String promptText = OVERALL_PROMPT
                     .replace("%%TITLE%%", title == null ? "" : title)
                     .replace("%%TOPICS%%", topicsText);
-            return chatModel.call(prompt);
+            OllamaOptions opts = OllamaOptions.builder()
+                    .temperature(0.2)
+                    .numPredict(400)
+                    .build();
+            return chatModel
+                    .call(new Prompt(List.of(new UserMessage(promptText)), opts))
+                    .getResult().getOutput().getText();
         } catch (Exception e) {
             log.warn("Overall summary failed: {}", e.getMessage());
             return "This video covers: " + topics.stream()

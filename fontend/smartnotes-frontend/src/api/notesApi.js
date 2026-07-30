@@ -14,10 +14,28 @@ export const generateNotes = async (payload) => {
   return data; // { jobId }
 };
 
-/** GET /api/notes/result/:jobId — returns NotesResponse or 202 if still running. */
+/** GET /api/notes/result/:jobId — returns NotesResponse, null (202 = still running), or throws on 404/5xx. */
 export const fetchResult = async (jobId) => {
-  const { data } = await api.get(`/api/notes/result/${jobId}`);
+  const { data, status } = await api.get(`/api/notes/result/${jobId}`, {
+    validateStatus: (s) => s < 500,
+  });
+  if (status === 404) throw new Error('Job not found — the session may have expired.');
+  if (status === 202) return null;
   return data;
+};
+
+/**
+ * Retries fetchResult up to maxAttempts times (1-second gap) until data is non-null.
+ * Handles the rare race where the SSE "complete" event arrives slightly before
+ * the result is queryable via the REST endpoint.
+ */
+export const fetchResultWithRetry = async (jobId, maxAttempts = 6) => {
+  for (let i = 0; i < maxAttempts; i++) {
+    const result = await fetchResult(jobId);
+    if (result && typeof result === 'object' && result.topics !== undefined) return result;
+    if (i < maxAttempts - 1) await new Promise((r) => setTimeout(r, 1000));
+  }
+  throw new Error('Result not available after retrying. Please refresh.');
 };
 
 /**
@@ -42,6 +60,9 @@ export const subscribeToProgress = (jobId, { onProgress, onComplete, onError }) 
     try { onProgress && onProgress(JSON.parse(e.data)); } catch {}
   });
 
+  // Server heartbeat — keep-alive only, ignore in UI
+  es.addEventListener('ping', () => {});
+
   es.addEventListener('complete', () => {
     close();
     onComplete && onComplete();
@@ -59,11 +80,14 @@ export const subscribeToProgress = (jobId, { onProgress, onComplete, onError }) 
   });
 
   // onerror = SSE transport error / connection dropped
-  es.onerror = () => {
-    if (es.readyState === EventSource.CLOSED && !closed) {
+  // readyState CONNECTING (0) means EventSource is auto-retrying — let it retry silently.
+  // readyState CLOSED (2) means EventSource gave up — report the failure.
+  es.onerror = (e) => {
+    if (!closed && es.readyState === EventSource.CLOSED) {
       close();
       onError && onError('Lost connection to server. Please try again.');
     }
+    // readyState === CONNECTING: EventSource is retrying — no action needed
   };
 
   return close; // caller can invoke to cancel

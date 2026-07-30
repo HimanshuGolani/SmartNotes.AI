@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { motion } from 'framer-motion';
-import { subscribeToProgress, fetchResult } from '../api/notesApi';
+import { subscribeToProgress, fetchResultWithRetry } from '../api/notesApi';
 
 const STAGE_ICONS = ['🔍', '⬇️', '🖼️', '🎙️', '🔗', '🧠', '👁️', '📄'];
 const STAGE_LABELS = [
@@ -25,6 +25,7 @@ export default function ProcessingStatus({ jobId, onComplete, onError }) {
   const [activeStage, setActiveStage] = useState(0);
   const [stageMessage, setStageMessage] = useState('Starting…');
   const [percent, setPercent] = useState(0);
+  const [fromCache, setFromCache] = useState(false);
   const startedAtRef = useRef(Date.now());
   const cleanupRef = useRef(null);
 
@@ -47,10 +48,12 @@ export default function ProcessingStatus({ jobId, onComplete, onError }) {
         setPercent(pct);
       },
       onComplete: async () => {
+        const wasInstant = elapsed < 3;
         setPercent(100);
-        setStageMessage('Done!');
+        setStageMessage(wasInstant ? 'Loaded from cache!' : 'Done!');
+        if (wasInstant) setFromCache(true);
         try {
-          const result = await fetchResult(jobId);
+          const result = await fetchResultWithRetry(jobId);
           onComplete && onComplete(result);
         } catch (e) {
           onError && onError('Processing finished but result could not be fetched: ' + e.message);
@@ -92,8 +95,23 @@ export default function ProcessingStatus({ jobId, onComplete, onError }) {
           className="gradient-text"
           style={{ fontSize: '28px', fontWeight: 800, marginTop: '12px' }}
         >
-          Crafting your notes
+          {fromCache ? 'Notes ready!' : 'Crafting your notes'}
         </h2>
+        {fromCache && (
+          <div style={{
+            display: 'inline-block',
+            marginTop: '6px',
+            padding: '4px 12px',
+            background: 'rgba(52, 211, 153, 0.15)',
+            border: '1px solid rgba(52, 211, 153, 0.4)',
+            borderRadius: '20px',
+            fontSize: '12px',
+            color: '#34d399',
+            fontWeight: 600,
+          }}>
+            Served from cache
+          </div>
+        )}
         <p style={{ color: 'var(--text-secondary)', fontSize: '14px', marginTop: '8px' }}>
           {stageMessage}
         </p>

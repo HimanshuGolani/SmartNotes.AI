@@ -5,6 +5,7 @@ import org.springframework.ai.chat.messages.UserMessage;
 import org.springframework.ai.chat.prompt.Prompt;
 import org.springframework.ai.content.Media;
 import org.springframework.ai.ollama.OllamaChatModel;
+import org.springframework.ai.ollama.api.OllamaOptions;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.core.io.FileSystemResource;
 import org.springframework.stereotype.Service;
@@ -41,7 +42,12 @@ public class VisionService {
                     .media(List.of(media))
                     .build();
 
-            String response = visionModel.call(new Prompt(List.of(userMessage)))
+            // temperature=0.1 for factual captions; numPredict=160 caps at ~2 sentences
+            OllamaOptions opts = OllamaOptions.builder()
+                    .temperature(0.1)
+                    .numPredict(160)
+                    .build();
+            String response = visionModel.call(new Prompt(List.of(userMessage), opts))
                     .getResult().getOutput().getText();
             return response.trim();
         } catch (Exception e) {

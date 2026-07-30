@@ -122,7 +122,7 @@ public class ExcalidrawMcpService {
     private static final int OVERVIEW_GAP = 40;
     private static final int FOOTER_GAP = 100;
     private static final int BADGE_SIZE = 40;
-    private static final int MAX_BULLETS_PER_TOPIC = 4;
+    private static final int MAX_BULLETS_PER_TOPIC = 6;
     private static final int MAX_CROSS_REFS = 3;
     private static final double SIMILARITY_THRESHOLD = 0.72;
     private static final int CAPTION_H = 60;

@@ -41,10 +41,14 @@ public class NotesController {
 
     /**
      * SSE stream that pushes progress events as the pipeline runs.
-     * Events: progress | complete | error
+     * Events: progress | ping | complete | error
      */
-    @GetMapping("/progress/{jobId}")
-    public SseEmitter streamProgress(@PathVariable String jobId) {
+    @GetMapping(value = "/progress/{jobId}", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
+    public SseEmitter streamProgress(
+            @PathVariable String jobId,
+            jakarta.servlet.http.HttpServletResponse response) {
+        response.setHeader("Cache-Control", "no-cache");
+        response.setHeader("X-Accel-Buffering", "no"); // disable nginx buffering if behind proxy
         log.info("SSE subscription | jobId={}", jobId);
         return jobProgressService.subscribe(jobId);
     }
